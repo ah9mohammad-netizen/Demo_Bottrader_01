@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-Replit + Telethon version (24/7 with Flask keep-alive + Commands)
+With Signal Performance Analysis Command
 """
 
 import asyncio
@@ -10,7 +10,7 @@ import os
 import re
 import requests
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 from flask import Flask
@@ -284,12 +284,71 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
+# ==================== SIGNAL PERFORMANCE ANALYSIS ====================
+async def analyze_channel_performance(client, days: int = 365):
+    """Analyze signal performance for the given number of days"""
+    
+    since_date = datetime.now() - timedelta(days=days)
+    
+    open_positions = {}
+    total_entries = 0
+    tp_reached = {"TP1": 0, "TP2": 0, "TP3": 0, "TP4": 0}
+
+    async for message in client.iter_messages(SIGNAL_GROUP_ID, offset_date=since_date, reverse=True):
+        if not message.text:
+            continue
+        text = message.text
+
+        # Entry signal
+        entry_match = ENTRY_PATTERN.search(text)
+        if entry_match:
+            direction = entry_match.group(2).upper()
+            pair = entry_match.group(3).upper()
+
+            if pair in open_positions and open_positions[pair]["direction"] != direction:
+                open_positions.pop(pair, None)
+
+            open_positions[pair] = {
+                "direction": direction,
+                "tps_hit": set()
+            }
+            total_entries += 1
+            continue
+
+        # TP signal
+        tp_match = TP_PATTERN.search(text)
+        if tp_match:
+            direction = tp_match.group(1).upper()
+            tp_level = int(tp_match.group(2))
+            pair = tp_match.group(3).upper()
+
+            if pair in open_positions:
+                pos = open_positions[pair]
+                if pos["direction"] == direction:
+                    tp_key = f"TP{tp_level}"
+                    if tp_key not in pos["tps_hit"]:
+                        pos["tps_hit"].add(tp_key)
+                        tp_reached[tp_key] += 1
+
+    # Build result message
+    msg = f"📊 **Signal Performance Analysis (Last {days} Days)**\n\n"
+    msg += f"Total Entry Signals: **{total_entries}**\n\n"
+    msg += "TP Hit Rates:\n"
+
+    for tp in ["TP1", "TP2", "TP3", "TP4"]:
+        count = tp_reached[tp]
+        percentage = (count / total_entries * 100) if total_entries > 0 else 0
+        msg += f"• {tp}: **{count}** ({percentage:.1f}%)\n"
+
+    msg += "\n✅ Analysis complete."
+    return msg
+
 # ==================== COMMAND HANDLER ====================
 async def handle_command(client, event):
     text = event.raw_text.strip().lower()
 
     if text == "/start":
-        await event.reply("✅ Bot activated! You will receive trade notifications here.\n\nUse /balance, /stats, /positions, /closeall, /help")
+        await event.reply("✅ Bot activated! You will receive trade notifications here.\n\nUse /balance, /stats, /positions, /closeall, /analyze, /help")
 
     elif text == "/balance":
         used = sum(p["margin"] for p in state["positions"].values())
@@ -340,6 +399,22 @@ async def handle_command(client, event):
             close_position(pair, reason="MANUAL")
         await event.reply("All positions closed.")
 
+    elif text.startswith("/analyze"):
+        # Parse number of days (default = 365)
+        parts = text.split()
+        days = 365
+        if len(parts) > 1:
+            try:
+                days = int(parts[1])
+                if days < 1:
+                    days = 365
+            except:
+                days = 365
+
+        await event.reply(f"🔄 Analyzing the last {days} days of signals... This may take a minute.")
+        result = await analyze_channel_performance(client, days)
+        await event.reply(result)
+
     elif text == "/help":
         await event.reply(
             "Commands:\n"
@@ -347,6 +422,7 @@ async def handle_command(client, event):
             "/stats - Trading statistics\n"
             "/positions - Open positions\n"
             "/closeall - Close everything\n"
+            "/analyze [days] - Analyze signal performance (default: 365 days)\n"
             "/help - This message"
         )
 
@@ -355,7 +431,7 @@ async def handle_command(client, event):
 
 # ==================== MAIN ====================
 async def main():
-    print("🚀 Starting Crypto Signal Bot on Replit...")
+    print("🚀 Starting Crypto Signal Bot...")
 
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await client.start()

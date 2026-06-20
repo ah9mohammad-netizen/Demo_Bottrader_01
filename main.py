@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Full Strategy Simulation (Corrected)
+With Realistic Strategy Simulation
 """
 
 import asyncio
@@ -283,9 +283,9 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
-# ==================== STRATEGY SIMULATION (CORRECTED) ====================
+# ==================== IMPROVED SIMULATION ====================
 async def simulate_trading_strategy(client, days: int = 365):
-    """Simulate trading with correct calculations and detailed stats"""
+    """Simulate trading with realistic assumptions"""
     
     since_date = datetime.now() - timedelta(days=days)
     
@@ -295,7 +295,6 @@ async def simulate_trading_strategy(client, days: int = 365):
     leverage = 7
     tp1_pnl = 7.0
     tp2_pnl = 14.0
-    sl_pnl = -7.0
     
     # Risk Management
     max_daily_loss = 5.0
@@ -432,6 +431,10 @@ async def simulate_trading_strategy(client, days: int = 365):
     msg += f"**Max Drawdown:** {round(max_drawdown, 1)}%\n"
     msg += f"**Daily Loss Limit Hits:** {daily_loss_hits}\n"
     msg += f"**Cooldowns Triggered:** {cooldown_count}\n"
+    
+    # Important warning
+    if losses == 0:
+        msg += "\n⚠️ **Note:** No losing trades detected. This is because the signal channel does not send SL messages. In real trading, losses will occur."
     
     if cooldown_count >= max_cooldowns:
         msg += "\n⚠️ Bot stopped after reaching maximum cooldowns."

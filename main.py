@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Realistic Strategy Simulation
+With Advanced Strategy Simulation (Historical Price Check for SL)
 """
 
 import asyncio
@@ -11,7 +11,7 @@ import re
 import requests
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from flask import Flask
 from telethon import TelegramClient, events
@@ -92,6 +92,49 @@ def get_binance_price(symbol: str) -> Optional[float]:
     except Exception as e:
         print(f"Price error for {symbol}: {e}")
         return None
+
+# ==================== HISTORICAL PRICE FETCHER ====================
+def get_historical_klines(symbol: str, start_time: int, end_time: int, interval: str = "1m") -> List:
+    """Fetch historical kline data from Binance"""
+    try:
+        clean_symbol = symbol.upper().replace("USDT", "").replace("USD", "")
+        test_symbol = clean_symbol + "USDT"
+        
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": test_symbol,
+            "interval": interval,
+            "startTime": start_time,
+            "endTime": end_time,
+            "limit": 1000
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        print(f"Historical price error for {symbol}: {e}")
+        return []
+
+def check_sl_hit(entry_price: float, direction: str, klines: List) -> bool:
+    """Check if SL (-1%) was hit in the price data"""
+    if not klines:
+        return False
+    
+    sl_price = entry_price * 0.99 if direction == "LONG" else entry_price * 1.01
+    
+    for kline in klines:
+        low = float(kline[3])
+        high = float(kline[2])
+        
+        if direction == "LONG":
+            if low <= sl_price:
+                return True
+        else:  # SHORT
+            if high >= sl_price:
+                return True
+    return False
 
 # ==================== PARSING ====================
 ENTRY_PATTERN = re.compile(
@@ -283,20 +326,18 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
-# ==================== IMPROVED SIMULATION ====================
+# ==================== ADVANCED SIMULATION ====================
 async def simulate_trading_strategy(client, days: int = 365):
-    """Simulate trading with realistic assumptions"""
+    """Advanced simulation with historical price check for SL"""
     
     since_date = datetime.now() - timedelta(days=days)
     
-    # Strategy Parameters
     starting_balance = 100.0
     allocation_percent = 0.05
     leverage = 7
     tp1_pnl = 7.0
     tp2_pnl = 14.0
     
-    # Risk Management
     max_daily_loss = 5.0
     max_consecutive_losses = 4
     cooldown_hours = 48
@@ -320,12 +361,12 @@ async def simulate_trading_strategy(client, days: int = 365):
     open_positions = {}
     
     ENTRY_PATTERN = re.compile(
-        r"(?:BINANCE|BITSTAMP):\s*(ENTER-)?(LONG|SHORT)[🟢🔴]*,?\s*([A-Z]+USDT|[A-Z]+USD)",
+        r"(?:BINANCE|BITSTAMP):\s*(ENTER-)?(LONG|SHORT)[🟢🔴]*,?\s*([A-Z]+USDT|[A-Z]+USD)\s*,?\s*💲current price\s*=\s*([\d.]+)",
         re.IGNORECASE
     )
     
     TP_PATTERN = re.compile(
-        r"(?:BINANCE|BITSTAMP):\s*(LONG|SHORT)[🟢🔴]-TP(\d+),?\s*([A-Z]+USDT|[A-Z]+USD)",
+        r"(?:BINANCE|BITSTAMP):\s*(LONG|SHORT)[🟢🔴]-TP(\d+),?\s*([A-Z]+USDT|[A-Z]+USD)\s*,?\s*💲current price\s*=\s*([\d.]+)",
         re.IGNORECASE
     )
 
@@ -335,6 +376,7 @@ async def simulate_trading_strategy(client, days: int = 365):
             
         text = message.text
         msg_date = message.date
+        timestamp = int(msg_date.timestamp() * 1000)
         
         if last_trade_date and msg_date.date() != last_trade_date:
             daily_loss = 0.0
@@ -346,10 +388,12 @@ async def simulate_trading_strategy(client, days: int = 365):
         if cooldown_count >= max_cooldowns:
             break
         
+        # Entry signal
         entry_match = ENTRY_PATTERN.search(text)
         if entry_match:
             direction = entry_match.group(2).upper()
             pair = entry_match.group(3).upper()
+            entry_price = float(entry_match.group(4))
             
             if daily_loss <= -max_daily_loss:
                 daily_loss_hits += 1
@@ -368,16 +412,19 @@ async def simulate_trading_strategy(client, days: int = 365):
             open_positions[pair] = {
                 "direction": direction,
                 "margin": margin,
-                "entry_time": msg_date
+                "entry_price": entry_price,
+                "entry_time": timestamp
             }
             total_trades += 1
             continue
         
+        # TP signal
         tp_match = TP_PATTERN.search(text)
         if tp_match:
             direction = tp_match.group(1).upper()
             tp_level = int(tp_match.group(2))
             pair = tp_match.group(3).upper()
+            tp_price = float(tp_match.group(4))
             
             if pair not in open_positions:
                 continue
@@ -386,25 +433,35 @@ async def simulate_trading_strategy(client, days: int = 365):
             if pos["direction"] != direction:
                 continue
             
-            if tp_level == 1:
-                pnl = tp1_pnl
-            elif tp_level == 2:
-                pnl = tp2_pnl
-            else:
-                continue
+            # Fetch historical prices between entry and TP
+            klines = get_historical_klines(pair, pos["entry_time"], timestamp)
             
-            profit = (pnl / 100) * pos["margin"]
-            balance += profit
-            total_profit += profit
+            # Check if SL was hit
+            sl_hit = check_sl_hit(pos["entry_price"], direction, klines)
             
-            if pnl > 0:
-                wins += 1
-                consecutive_losses = 0
-            else:
+            if sl_hit:
+                # SL was hit → Loss
                 losses += 1
                 consecutive_losses += 1
+                profit = (sl_pnl / 100) * pos["margin"]
+                balance += profit
                 daily_loss += profit
+            else:
+                # No SL hit → Count as win
+                if tp_level == 1:
+                    pnl = tp1_pnl
+                elif tp_level == 2:
+                    pnl = tp2_pnl
+                else:
+                    continue
+                
+                profit = (pnl / 100) * pos["margin"]
+                balance += profit
+                total_profit += profit
+                wins += 1
+                consecutive_losses = 0
             
+            # Track drawdown
             if balance > peak_balance:
                 peak_balance = balance
             drawdown = (peak_balance - balance) / peak_balance * 100
@@ -418,7 +475,7 @@ async def simulate_trading_strategy(client, days: int = 365):
     win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
     avg_profit_per_trade = round(total_profit / total_trades, 2) if total_trades > 0 else 0
     
-    msg = f"📊 **Strategy Simulation ({days} Days)**\n\n"
+    msg = f"📊 **Advanced Strategy Simulation ({days} Days)**\n\n"
     msg += f"**Starting Balance:** ${starting_balance}\n"
     msg += f"**Final Balance:** ${final_balance}\n"
     msg += f"**Total PNL:** ${total_pnl} ({round(total_pnl/starting_balance*100, 1)}%)\n\n"
@@ -431,10 +488,6 @@ async def simulate_trading_strategy(client, days: int = 365):
     msg += f"**Max Drawdown:** {round(max_drawdown, 1)}%\n"
     msg += f"**Daily Loss Limit Hits:** {daily_loss_hits}\n"
     msg += f"**Cooldowns Triggered:** {cooldown_count}\n"
-    
-    # Important warning
-    if losses == 0:
-        msg += "\n⚠️ **Note:** No losing trades detected. This is because the signal channel does not send SL messages. In real trading, losses will occur."
     
     if cooldown_count >= max_cooldowns:
         msg += "\n⚠️ Bot stopped after reaching maximum cooldowns."
@@ -508,7 +561,7 @@ async def handle_command(client, event):
             except:
                 days = 365
 
-        await event.reply(f"🔄 Running strategy simulation for the last {days} days...")
+        await event.reply(f"🔄 Running advanced simulation for the last {days} days (this may take a while)...")
         result = await simulate_trading_strategy(client, days)
         await event.reply(result)
 
@@ -519,7 +572,7 @@ async def handle_command(client, event):
             "/stats - Trading statistics\n"
             "/positions - Open positions\n"
             "/closeall - Close everything\n"
-            "/analyze [days] - Simulate trading strategy (default: 365 days)\n"
+            "/analyze [days] - Advanced simulation with SL detection (default: 365 days)\n"
             "/help - This message"
         )
 

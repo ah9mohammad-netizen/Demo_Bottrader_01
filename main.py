@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Full Strategy Simulation in /analyze Command
+With Full Strategy Simulation (Corrected)
 """
 
 import asyncio
@@ -283,9 +283,9 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
-# ==================== NEW: STRATEGY SIMULATION ====================
+# ==================== STRATEGY SIMULATION (CORRECTED) ====================
 async def simulate_trading_strategy(client, days: int = 365):
-    """Simulate trading based on the approved strategy"""
+    """Simulate trading with correct calculations and detailed stats"""
     
     since_date = datetime.now() - timedelta(days=days)
     
@@ -293,9 +293,9 @@ async def simulate_trading_strategy(client, days: int = 365):
     starting_balance = 100.0
     allocation_percent = 0.05
     leverage = 7
-    tp1_pnl = 7.0      # 1% price move * 7x
-    tp2_pnl = 14.0     # 2% price move * 7x
-    sl_pnl = -7.0      # -1% price move * 7x
+    tp1_pnl = 7.0
+    tp2_pnl = 14.0
+    sl_pnl = -7.0
     
     # Risk Management
     max_daily_loss = 5.0
@@ -313,8 +313,10 @@ async def simulate_trading_strategy(client, days: int = 365):
     total_trades = 0
     wins = 0
     losses = 0
+    daily_loss_hits = 0
     max_drawdown = 0.0
     peak_balance = starting_balance
+    total_profit = 0.0
     
     open_positions = {}
     
@@ -335,35 +337,31 @@ async def simulate_trading_strategy(client, days: int = 365):
         text = message.text
         msg_date = message.date
         
-        # Reset daily loss at new day
         if last_trade_date and msg_date.date() != last_trade_date:
             daily_loss = 0.0
         last_trade_date = msg_date.date()
         
-        # Check cooldown
         if cooldown_until and msg_date < cooldown_until:
             continue
         
-        # Check max cooldowns reached
         if cooldown_count >= max_cooldowns:
             break
         
-        # Entry signal
         entry_match = ENTRY_PATTERN.search(text)
         if entry_match:
             direction = entry_match.group(2).upper()
             pair = entry_match.group(3).upper()
             
-            # Risk checks
             if daily_loss <= -max_daily_loss:
+                daily_loss_hits += 1
                 continue
+                
             if consecutive_losses >= max_consecutive_losses:
                 cooldown_until = msg_date + timedelta(hours=cooldown_hours)
                 cooldown_count += 1
                 consecutive_losses = 0
                 continue
             
-            # Calculate margin
             margin = balance * allocation_percent
             if margin < 1:
                 continue
@@ -376,7 +374,6 @@ async def simulate_trading_strategy(client, days: int = 365):
             total_trades += 1
             continue
         
-        # TP or SL handling
         tp_match = TP_PATTERN.search(text)
         if tp_match:
             direction = tp_match.group(1).upper()
@@ -390,15 +387,16 @@ async def simulate_trading_strategy(client, days: int = 365):
             if pos["direction"] != direction:
                 continue
             
-            pnl = 0
             if tp_level == 1:
                 pnl = tp1_pnl
             elif tp_level == 2:
                 pnl = tp2_pnl
+            else:
+                continue
             
-            # Apply PNL
-            profit = (pnl / 100) * pos["margin"] * leverage
+            profit = (pnl / 100) * pos["margin"]
             balance += profit
+            total_profit += profit
             
             if pnl > 0:
                 wins += 1
@@ -408,7 +406,6 @@ async def simulate_trading_strategy(client, days: int = 365):
                 consecutive_losses += 1
                 daily_loss += profit
             
-            # Track drawdown
             if balance > peak_balance:
                 peak_balance = balance
             drawdown = (peak_balance - balance) / peak_balance * 100
@@ -417,20 +414,27 @@ async def simulate_trading_strategy(client, days: int = 365):
             
             del open_positions[pair]
 
-    # Final Results
     final_balance = round(balance, 2)
     total_pnl = round(final_balance - starting_balance, 2)
     win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
+    avg_profit_per_trade = round(total_profit / total_trades, 2) if total_trades > 0 else 0
     
     msg = f"📊 **Strategy Simulation ({days} Days)**\n\n"
-    msg += f"Starting Balance: **${starting_balance}**\n"
-    msg += f"Final Balance: **${final_balance}**\n"
-    msg += f"Total PNL: **${total_pnl}** ({round(total_pnl/starting_balance*100, 1)}%)\n\n"
-    msg += f"Total Trades: **{total_trades}**\n"
-    msg += f"Wins: **{wins}** | Losses: **{losses}**\n"
-    msg += f"Win Rate: **{win_rate}%**\n"
-    msg += f"Max Drawdown: **{round(max_drawdown, 1)}%**\n"
-    msg += f"Cooldowns Triggered: **{cooldown_count}**\n"
+    msg += f"**Starting Balance:** ${starting_balance}\n"
+    msg += f"**Final Balance:** ${final_balance}\n"
+    msg += f"**Total PNL:** ${total_pnl} ({round(total_pnl/starting_balance*100, 1)}%)\n\n"
+    
+    msg += f"**Total Trades:** {total_trades}\n"
+    msg += f"**Wins:** {wins} | **Losses:** {losses}\n"
+    msg += f"**Win Rate:** {win_rate}%\n"
+    msg += f"**Avg Profit per Trade:** ${avg_profit_per_trade}\n\n"
+    
+    msg += f"**Max Drawdown:** {round(max_drawdown, 1)}%\n"
+    msg += f"**Daily Loss Limit Hits:** {daily_loss_hits}\n"
+    msg += f"**Cooldowns Triggered:** {cooldown_count}\n"
+    
+    if cooldown_count >= max_cooldowns:
+        msg += "\n⚠️ Bot stopped after reaching maximum cooldowns."
     
     return msg
 

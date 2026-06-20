@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Signal Performance Analysis Command
+With Full Strategy Simulation in /analyze Command
 """
 
 import asyncio
@@ -37,7 +37,6 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 
 if not SESSION_STRING:
     print("❌ ERROR: SESSION_STRING not found!")
-    print("Please add it in Replit Secrets (key: SESSION_STRING)")
     exit(1)
 
 # Demo trading rules
@@ -284,63 +283,155 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
-# ==================== SIGNAL PERFORMANCE ANALYSIS ====================
-async def analyze_channel_performance(client, days: int = 365):
-    """Analyze signal performance for the given number of days"""
+# ==================== NEW: STRATEGY SIMULATION ====================
+async def simulate_trading_strategy(client, days: int = 365):
+    """Simulate trading based on the approved strategy"""
     
     since_date = datetime.now() - timedelta(days=days)
     
+    # Strategy Parameters
+    starting_balance = 100.0
+    allocation_percent = 0.05
+    leverage = 7
+    tp1_pnl = 7.0      # 1% price move * 7x
+    tp2_pnl = 14.0     # 2% price move * 7x
+    sl_pnl = -7.0      # -1% price move * 7x
+    
+    # Risk Management
+    max_daily_loss = 5.0
+    max_consecutive_losses = 4
+    cooldown_hours = 48
+    max_cooldowns = 3
+    
+    balance = starting_balance
+    consecutive_losses = 0
+    cooldown_until = None
+    cooldown_count = 0
+    daily_loss = 0.0
+    last_trade_date = None
+    
+    total_trades = 0
+    wins = 0
+    losses = 0
+    max_drawdown = 0.0
+    peak_balance = starting_balance
+    
     open_positions = {}
-    total_entries = 0
-    tp_reached = {"TP1": 0, "TP2": 0, "TP3": 0, "TP4": 0}
+    
+    ENTRY_PATTERN = re.compile(
+        r"(?:BINANCE|BITSTAMP):\s*(ENTER-)?(LONG|SHORT)[🟢🔴]*,?\s*([A-Z]+USDT|[A-Z]+USD)",
+        re.IGNORECASE
+    )
+    
+    TP_PATTERN = re.compile(
+        r"(?:BINANCE|BITSTAMP):\s*(LONG|SHORT)[🟢🔴]-TP(\d+),?\s*([A-Z]+USDT|[A-Z]+USD)",
+        re.IGNORECASE
+    )
 
     async for message in client.iter_messages(SIGNAL_GROUP_ID, offset_date=since_date, reverse=True):
         if not message.text:
             continue
+            
         text = message.text
-
+        msg_date = message.date
+        
+        # Reset daily loss at new day
+        if last_trade_date and msg_date.date() != last_trade_date:
+            daily_loss = 0.0
+        last_trade_date = msg_date.date()
+        
+        # Check cooldown
+        if cooldown_until and msg_date < cooldown_until:
+            continue
+        
+        # Check max cooldowns reached
+        if cooldown_count >= max_cooldowns:
+            break
+        
         # Entry signal
         entry_match = ENTRY_PATTERN.search(text)
         if entry_match:
             direction = entry_match.group(2).upper()
             pair = entry_match.group(3).upper()
-
-            if pair in open_positions and open_positions[pair]["direction"] != direction:
-                open_positions.pop(pair, None)
-
+            
+            # Risk checks
+            if daily_loss <= -max_daily_loss:
+                continue
+            if consecutive_losses >= max_consecutive_losses:
+                cooldown_until = msg_date + timedelta(hours=cooldown_hours)
+                cooldown_count += 1
+                consecutive_losses = 0
+                continue
+            
+            # Calculate margin
+            margin = balance * allocation_percent
+            if margin < 1:
+                continue
+            
             open_positions[pair] = {
                 "direction": direction,
-                "tps_hit": set()
+                "margin": margin,
+                "entry_time": msg_date
             }
-            total_entries += 1
+            total_trades += 1
             continue
-
-        # TP signal
+        
+        # TP or SL handling
         tp_match = TP_PATTERN.search(text)
         if tp_match:
             direction = tp_match.group(1).upper()
             tp_level = int(tp_match.group(2))
             pair = tp_match.group(3).upper()
+            
+            if pair not in open_positions:
+                continue
+                
+            pos = open_positions[pair]
+            if pos["direction"] != direction:
+                continue
+            
+            pnl = 0
+            if tp_level == 1:
+                pnl = tp1_pnl
+            elif tp_level == 2:
+                pnl = tp2_pnl
+            
+            # Apply PNL
+            profit = (pnl / 100) * pos["margin"] * leverage
+            balance += profit
+            
+            if pnl > 0:
+                wins += 1
+                consecutive_losses = 0
+            else:
+                losses += 1
+                consecutive_losses += 1
+                daily_loss += profit
+            
+            # Track drawdown
+            if balance > peak_balance:
+                peak_balance = balance
+            drawdown = (peak_balance - balance) / peak_balance * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+            
+            del open_positions[pair]
 
-            if pair in open_positions:
-                pos = open_positions[pair]
-                if pos["direction"] == direction:
-                    tp_key = f"TP{tp_level}"
-                    if tp_key not in pos["tps_hit"]:
-                        pos["tps_hit"].add(tp_key)
-                        tp_reached[tp_key] += 1
-
-    # Build result message
-    msg = f"📊 **Signal Performance Analysis (Last {days} Days)**\n\n"
-    msg += f"Total Entry Signals: **{total_entries}**\n\n"
-    msg += "TP Hit Rates:\n"
-
-    for tp in ["TP1", "TP2", "TP3", "TP4"]:
-        count = tp_reached[tp]
-        percentage = (count / total_entries * 100) if total_entries > 0 else 0
-        msg += f"• {tp}: **{count}** ({percentage:.1f}%)\n"
-
-    msg += "\n✅ Analysis complete."
+    # Final Results
+    final_balance = round(balance, 2)
+    total_pnl = round(final_balance - starting_balance, 2)
+    win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
+    
+    msg = f"📊 **Strategy Simulation ({days} Days)**\n\n"
+    msg += f"Starting Balance: **${starting_balance}**\n"
+    msg += f"Final Balance: **${final_balance}**\n"
+    msg += f"Total PNL: **${total_pnl}** ({round(total_pnl/starting_balance*100, 1)}%)\n\n"
+    msg += f"Total Trades: **{total_trades}**\n"
+    msg += f"Wins: **{wins}** | Losses: **{losses}**\n"
+    msg += f"Win Rate: **{win_rate}%**\n"
+    msg += f"Max Drawdown: **{round(max_drawdown, 1)}%**\n"
+    msg += f"Cooldowns Triggered: **{cooldown_count}**\n"
+    
     return msg
 
 # ==================== COMMAND HANDLER ====================
@@ -400,7 +491,6 @@ async def handle_command(client, event):
         await event.reply("All positions closed.")
 
     elif text.startswith("/analyze"):
-        # Parse number of days (default = 365)
         parts = text.split()
         days = 365
         if len(parts) > 1:
@@ -411,8 +501,8 @@ async def handle_command(client, event):
             except:
                 days = 365
 
-        await event.reply(f"🔄 Analyzing the last {days} days of signals... This may take a minute.")
-        result = await analyze_channel_performance(client, days)
+        await event.reply(f"🔄 Running strategy simulation for the last {days} days...")
+        result = await simulate_trading_strategy(client, days)
         await event.reply(result)
 
     elif text == "/help":
@@ -422,7 +512,7 @@ async def handle_command(client, event):
             "/stats - Trading statistics\n"
             "/positions - Open positions\n"
             "/closeall - Close everything\n"
-            "/analyze [days] - Analyze signal performance (default: 365 days)\n"
+            "/analyze [days] - Simulate trading strategy (default: 365 days)\n"
             "/help - This message"
         )
 
@@ -440,10 +530,8 @@ async def main():
 
     await send_notification(client, "✅ Crypto Demo Bot is now running and listening to signals.")
 
-    # Background SL monitor
     asyncio.create_task(check_sl(client))
 
-    # Signal handler (from group)
     @client.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
     async def signal_handler(event):
         signal = parse_signal(event.raw_text)
@@ -459,7 +547,6 @@ async def main():
         elif signal["type"] == "tp":
             handle_tp(pair, signal["tp_level"], price)
 
-    # Command handler (private chat only)
     @client.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/'))
     async def command_handler(event):
         await handle_command(client, event)
@@ -468,7 +555,6 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    # Start Flask server in background
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Signal Performance Analysis Command
+With SL Optimization Analysis
 """
 
 import asyncio
@@ -11,7 +11,7 @@ import re
 import requests
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from flask import Flask
 from telethon import TelegramClient, events
@@ -37,7 +37,6 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 
 if not SESSION_STRING:
     print("❌ ERROR: SESSION_STRING not found!")
-    print("Please add it in Replit Secrets (key: SESSION_STRING)")
     exit(1)
 
 # Demo trading rules
@@ -93,6 +92,50 @@ def get_binance_price(symbol: str) -> Optional[float]:
     except Exception as e:
         print(f"Price error for {symbol}: {e}")
         return None
+
+# ==================== HISTORICAL PRICE ====================
+def get_historical_klines(symbol: str, start_time: int, end_time: int, interval: str = "1m") -> List:
+    try:
+        clean_symbol = symbol.upper().replace("USDT", "").replace("USD", "")
+        test_symbol = clean_symbol + "USDT"
+        
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": test_symbol,
+            "interval": interval,
+            "startTime": start_time,
+            "endTime": end_time,
+            "limit": 1000
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except Exception as e:
+        print(f"Historical price error for {symbol}: {e}")
+        return []
+
+def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> float:
+    """Calculate maximum adverse price movement (in %)"""
+    if not klines:
+        return 0.0
+    
+    max_adverse = 0.0
+    
+    for kline in klines:
+        low = float(kline[3])
+        high = float(kline[2])
+        
+        if direction == "LONG":
+            adverse_move = ((entry_price - low) / entry_price) * 100
+        else:
+            adverse_move = ((high - entry_price) / entry_price) * 100
+        
+        if adverse_move > max_adverse:
+            max_adverse = adverse_move
+    
+    return round(max_adverse, 2)
 
 # ==================== PARSING ====================
 ENTRY_PATTERN = re.compile(
@@ -284,63 +327,104 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
-# ==================== SIGNAL PERFORMANCE ANALYSIS ====================
-async def analyze_channel_performance(client, days: int = 365):
-    """Analyze signal performance for the given number of days"""
+# ==================== SL OPTIMIZATION ANALYSIS ====================
+async def optimize_stop_loss(client, days: int = 365):
+    """Analyze optimal Stop Loss level based on historical adverse moves"""
     
     since_date = datetime.now() - timedelta(days=days)
     
+    adverse_moves = []  # Store max adverse move for winning trades
+    
     open_positions = {}
-    total_entries = 0
-    tp_reached = {"TP1": 0, "TP2": 0, "TP3": 0, "TP4": 0}
+    
+    ENTRY_PATTERN = re.compile(
+        r"(?:BINANCE|BITSTAMP):\s*(ENTER-)?(LONG|SHORT)[🟢🔴]*,?\s*([A-Z]+USDT|[A-Z]+USD)\s*,?\s*💲current price\s*=\s*([\d.]+)",
+        re.IGNORECASE
+    )
+    
+    TP_PATTERN = re.compile(
+        r"(?:BINANCE|BITSTAMP):\s*(LONG|SHORT)[🟢🔴]-TP(\d+),?\s*([A-Z]+USDT|[A-Z]+USD)\s*,?\s*💲current price\s*=\s*([\d.]+)",
+        re.IGNORECASE
+    )
 
     async for message in client.iter_messages(SIGNAL_GROUP_ID, offset_date=since_date, reverse=True):
         if not message.text:
             continue
+            
         text = message.text
-
-        # Entry signal
+        msg_date = message.date
+        timestamp = int(msg_date.timestamp() * 1000)
+        
         entry_match = ENTRY_PATTERN.search(text)
         if entry_match:
             direction = entry_match.group(2).upper()
             pair = entry_match.group(3).upper()
-
-            if pair in open_positions and open_positions[pair]["direction"] != direction:
-                open_positions.pop(pair, None)
-
+            entry_price = float(entry_match.group(4))
+            
             open_positions[pair] = {
                 "direction": direction,
-                "tps_hit": set()
+                "entry_price": entry_price,
+                "entry_time": timestamp
             }
-            total_entries += 1
             continue
-
-        # TP signal
+        
         tp_match = TP_PATTERN.search(text)
         if tp_match:
             direction = tp_match.group(1).upper()
             tp_level = int(tp_match.group(2))
             pair = tp_match.group(3).upper()
+            
+            if pair not in open_positions:
+                continue
+                
+            pos = open_positions[pair]
+            if pos["direction"] != direction:
+                continue
+            
+            # Only consider trades that reached TP2
+            if tp_level == 2:
+                # Fetch historical prices
+                klines = get_historical_klines(pair, pos["entry_time"], timestamp)
+                
+                # Calculate max adverse move
+                max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
+                adverse_moves.append(max_adverse)
+            
+            del open_positions[pair]
 
-            if pair in open_positions:
-                pos = open_positions[pair]
-                if pos["direction"] == direction:
-                    tp_key = f"TP{tp_level}"
-                    if tp_key not in pos["tps_hit"]:
-                        pos["tps_hit"].add(tp_key)
-                        tp_reached[tp_key] += 1
+    if not adverse_moves:
+        return "❌ Not enough data to analyze Stop Loss levels."
 
-    # Build result message
-    msg = f"📊 **Signal Performance Analysis (Last {days} Days)**\n\n"
-    msg += f"Total Entry Signals: **{total_entries}**\n\n"
-    msg += "TP Hit Rates:\n"
-
-    for tp in ["TP1", "TP2", "TP3", "TP4"]:
-        count = tp_reached[tp]
-        percentage = (count / total_entries * 100) if total_entries > 0 else 0
-        msg += f"• {tp}: **{count}** ({percentage:.1f}%)\n"
-
-    msg += "\n✅ Analysis complete."
+    # Analyze different SL levels
+    sl_levels = [0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
+    
+    total_winning_trades = len(adverse_moves)
+    
+    msg = f"📊 **Stop Loss Optimization Analysis ({days} Days)**\n\n"
+    msg += f"**Total Winning Trades Analyzed:** {total_winning_trades}\n\n"
+    msg += "**SL Level Analysis:**\n"
+    msg += "SL Level | % of Winning Trades Protected | Risk Level\n"
+    msg += "---------|-----------------------------|------------\n"
+    
+    for sl in sl_levels:
+        trades_protected = sum(1 for move in adverse_moves if move <= sl)
+        percentage = (trades_protected / total_winning_trades) * 100
+        
+        if percentage >= 90:
+            risk = "Very Safe"
+        elif percentage >= 80:
+            risk = "Safe"
+        elif percentage >= 70:
+            risk = "Balanced"
+        else:
+            risk = "Risky"
+        
+        msg += f"-{sl}%     | {percentage:.1f}%                        | {risk}\n"
+    
+    msg += "\n**Recommendation:**\n"
+    msg += "Choose an SL level that protects at least 80-85% of your winning trades.\n"
+    msg += "A good starting point is usually between **-1.0%** and **-1.5%**."
+    
     return msg
 
 # ==================== COMMAND HANDLER ====================
@@ -348,7 +432,7 @@ async def handle_command(client, event):
     text = event.raw_text.strip().lower()
 
     if text == "/start":
-        await event.reply("✅ Bot activated! You will receive trade notifications here.\n\nUse /balance, /stats, /positions, /closeall, /analyze, /help")
+        await event.reply("✅ Bot activated! You will receive trade notifications here.\n\nUse /balance, /stats, /positions, /closeall, /analyze, /optimize_sl, /help")
 
     elif text == "/balance":
         used = sum(p["margin"] for p in state["positions"].values())
@@ -400,19 +484,27 @@ async def handle_command(client, event):
         await event.reply("All positions closed.")
 
     elif text.startswith("/analyze"):
-        # Parse number of days (default = 365)
         parts = text.split()
         days = 365
         if len(parts) > 1:
             try:
                 days = int(parts[1])
-                if days < 1:
-                    days = 365
             except:
                 days = 365
+        await event.reply(f"🔄 Running simulation for the last {days} days...")
+        result = await simulate_trading_strategy(client, days)
+        await event.reply(result)
 
-        await event.reply(f"🔄 Analyzing the last {days} days of signals... This may take a minute.")
-        result = await analyze_channel_performance(client, days)
+    elif text.startswith("/optimize_sl"):
+        parts = text.split()
+        days = 365
+        if len(parts) > 1:
+            try:
+                days = int(parts[1])
+            except:
+                days = 365
+        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days (this may take a while)...")
+        result = await optimize_stop_loss(client, days)
         await event.reply(result)
 
     elif text == "/help":
@@ -422,7 +514,8 @@ async def handle_command(client, event):
             "/stats - Trading statistics\n"
             "/positions - Open positions\n"
             "/closeall - Close everything\n"
-            "/analyze [days] - Analyze signal performance (default: 365 days)\n"
+            "/analyze [days] - Strategy simulation\n"
+            "/optimize_sl [days] - Find best Stop Loss level\n"
             "/help - This message"
         )
 
@@ -440,10 +533,8 @@ async def main():
 
     await send_notification(client, "✅ Crypto Demo Bot is now running and listening to signals.")
 
-    # Background SL monitor
     asyncio.create_task(check_sl(client))
 
-    # Signal handler (from group)
     @client.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
     async def signal_handler(event):
         signal = parse_signal(event.raw_text)
@@ -459,7 +550,6 @@ async def main():
         elif signal["type"] == "tp":
             handle_tp(pair, signal["tp_level"], price)
 
-    # Command handler (private chat only)
     @client.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/'))
     async def command_handler(event):
         await handle_command(client, event)
@@ -468,7 +558,6 @@ async def main():
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    # Start Flask server in background
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()

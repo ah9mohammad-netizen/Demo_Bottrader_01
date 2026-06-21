@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-SL Optimization - Improved Data Collection
+SL Optimization - Focused on Pairs with Good CoinGecko Data
 """
 
 import asyncio
@@ -90,6 +90,32 @@ def get_binance_price(symbol: str) -> Optional[float]:
     except:
         return None
 
+# ==================== COINGECKO SUPPORTED PAIRS ====================
+# These pairs have relatively good historical data on CoinGecko
+SUPPORTED_PAIRS = {
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
+    "DOGEUSDT", "TONUSDT", "PEPEUSDT", "SHIBUSDT", "ADAUSDT",
+    "AVAXUSDT", "LINKUSDT", "LTCUSDT", "BCHUSDT", "DOTUSDT",
+    "NEARUSDT", "APTUSDT", "SUIUSDT", "ARUSDT", "OPUSDT",
+    "ARBUSDT", "INJUSDT", "SEIUSDT", "JUPUSDT", "WIFUSDT",
+    "BONKUSDT", "FLOKIUSDT", "MEMEUSDT", "ORDIUSDT", "RUNEUSDT",
+    "DYDXUSDT", "STRKUSDT", "TIAUSDT", "JTOUSDT", "PYTHUSDT",
+    "WUSDT", "AEVOUSDT", "ALTUSDT", "ZROUSDT", "IOUSDT",
+    "TAOUSDT", "FETUSDT", "RNDRUSDT", "GRTUSDT", "IMXUSDT",
+    "LDOUSDT", "AAVEUSDT", "UNIUSDT", "MKRUSDT", "SNXUSDT",
+    "CRVUSDT", "COMPUSDT", "YFIUSDT", "SUSHIUSDT", "1INCHUSDT",
+    "ZRXUSDT", "BATUSDT", "ENJUSDT", "MANAUSDT", "SANDUSDT",
+    "AXSUSDT", "CHZUSDT", "GALAUSDT", "ILVUSDT", "PIXELUSDT",
+    "PORTALUSDT", "MAVIAUSDT", "PRIMEUSDT", "DYMUSDT", "ZETAUSDT",
+    "OMNIUSDT", "REZUSDT", "ETHFIUSDT", "BOMEUSDT", "MOGUSDT",
+    "BRETTUSDT", "TOSHIUSDT", "DEGENUSDT", "HIGHERUSDT", "MOODENGUSDT",
+    "PNUTUSDT", "GOATUSDT", "ACTUSDT", "FARTCOINUSDT", "POPCATUSDT",
+    "MEWUSDT"
+}
+
+def is_supported_pair(pair: str) -> bool:
+    return pair.upper() in SUPPORTED_PAIRS
+
 # ==================== COINGECKO HISTORICAL DATA ====================
 COINGECKO_ID_MAP = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
@@ -140,7 +166,7 @@ def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
         if response.status_code == 200:
             data = response.json()
             prices = data.get("prices", [])
-            if len(prices) < 8:  # Require at least 8 data points
+            if len(prices) < 5:
                 return []
             klines = []
             for i in range(len(prices)):
@@ -153,6 +179,8 @@ def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
         return []
 
 def get_historical_klines(symbol: str, start_time: int, end_time: int) -> List:
+    if not is_supported_pair(symbol):
+        return []
     return get_coingecko_klines(symbol, start_time, end_time)
 
 def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> float:
@@ -331,13 +359,14 @@ async def send_notification(client, message: str):
     except:
         pass
 
-# ==================== IMPROVED SL OPTIMIZATION ====================
+# ==================== SL OPTIMIZATION ====================
 async def optimize_stop_loss(client, days: int = 365):
     since_date = datetime.now() - timedelta(days=days)
     
     adverse_moves = []
     successful = 0
     failed = 0
+    unsupported = 0
     
     open_positions = {}
     
@@ -354,6 +383,10 @@ async def optimize_stop_loss(client, days: int = 365):
             direction = entry_match.group(2).upper()
             pair = entry_match.group(3).upper()
             entry_price = float(entry_match.group(4))
+            
+            if not is_supported_pair(pair):
+                unsupported += 1
+                continue
             
             open_positions[pair] = {
                 "direction": direction,
@@ -378,7 +411,7 @@ async def optimize_stop_loss(client, days: int = 365):
             if tp_level in [1, 2]:
                 klines = get_historical_klines(pair, pos["entry_time"], timestamp)
                 
-                if len(klines) >= 8:  # Require minimum 8 data points
+                if len(klines) >= 5:
                     max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
                     adverse_moves.append(max_adverse)
                     successful += 1
@@ -395,7 +428,8 @@ async def optimize_stop_loss(client, days: int = 365):
     
     msg = f"📊 **SL Optimization Analysis ({days} Days)**\n\n"
     msg += f"**Winning Trades Analyzed:** {successful}\n"
-    msg += f"**Insufficient Data:** {failed}\n\n"
+    msg += f"**Insufficient Data:** {failed}\n"
+    msg += f"**Unsupported Pairs:** {unsupported}\n\n"
     msg += "SL Level | Protection % | Recommendation\n"
     msg += "---------|-------------|----------------\n"
     

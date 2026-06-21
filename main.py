@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Improved SL Optimization Analysis (Reliable Historical Price Check)
+With Improved SL Optimization (Binance + CoinGecko Fallback)
 """
 
 import asyncio
@@ -89,50 +89,88 @@ def get_binance_price(symbol: str) -> Optional[float]:
             if resp.status_code == 200:
                 return float(resp.json()["price"])
         return None
-    except Exception as e:
-        print(f"Price error for {symbol}: {e}")
+    except:
         return None
 
-# ==================== IMPROVED HISTORICAL PRICE FETCHER ====================
-def get_historical_klines(symbol: str, start_time: int, end_time: int, interval: str = "5m") -> List:
-    """Fetch historical kline data from Binance (5m or 15m for better coverage)"""
+# ==================== HISTORICAL PRICE (Binance + CoinGecko) ====================
+def get_binance_klines(symbol: str, start_time: int, end_time: int, interval: str = "15m") -> List:
     try:
-        clean_symbol = symbol.upper().replace("USDT", "").replace("USD", "")
-        test_symbol = clean_symbol + "USDT"
-        
-        url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": test_symbol,
-            "interval": interval,
-            "startTime": start_time,
-            "endTime": end_time,
-            "limit": 1000
+        clean = symbol.upper().replace("USDT", "").replace("USD", "")
+        for suffix in ["USDT", "USD"]:
+            test_symbol = clean + suffix
+            url = "https://api.binance.com/api/v3/klines"
+            params = {
+                "symbol": test_symbol,
+                "interval": interval,
+                "startTime": start_time,
+                "endTime": end_time,
+                "limit": 1000
+            }
+            response = requests.get(url, params=params, timeout=20)
+            if response.status_code == 200:
+                data = response.json()
+                if len(data) >= 5:
+                    return data
+        return []
+    except:
+        return []
+
+def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
+    try:
+        mapping = {
+            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+            "BNB": "binancecoin", "XRP": "ripple", "DOGE": "dogecoin",
+            "TON": "the-open-network", "NOT": "notcoin", "PEPE": "pepe",
+            "SHIB": "shiba-inu", "ADA": "cardano", "AVAX": "avalanche-2",
+            "LINK": "chainlink", "LTC": "litecoin"
         }
+        clean = symbol.upper().replace("USDT", "").replace("USD", "")
+        coin_id = mapping.get(clean, clean.lower())
         
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
+        params = {
+            "vs_currency": "usd",
+            "from": start_time // 1000,
+            "to": end_time // 1000
+        }
         response = requests.get(url, params=params, timeout=20)
         if response.status_code == 200:
             data = response.json()
-            if len(data) > 0:
-                return data
+            prices = data.get("prices", [])
+            klines = []
+            for i in range(len(prices)):
+                ts = prices[i][0]
+                price = prices[i][1]
+                klines.append([ts, price, price, price, price])
+            return klines
         return []
-    except Exception as e:
-        print(f"Historical price error for {symbol}: {e}")
+    except:
         return []
 
+def get_historical_klines(symbol: str, start_time: int, end_time: int) -> List:
+    """Try Binance first, then CoinGecko"""
+    klines = get_binance_klines(symbol, start_time, end_time, "15m")
+    if len(klines) >= 5:
+        return klines
+    
+    klines = get_coingecko_klines(symbol, start_time, end_time)
+    if len(klines) >= 5:
+        return klines
+    
+    return []
+
 def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> float:
-    """Calculate maximum adverse price movement in percentage"""
     if not klines or len(klines) < 2:
         return 0.0
     
     max_adverse = 0.0
-    
     for kline in klines:
         low = float(kline[3])
         high = float(kline[2])
         
         if direction == "LONG":
             adverse = ((entry_price - low) / entry_price) * 100
-        else:  # SHORT
+        else:
             adverse = ((high - entry_price) / entry_price) * 100
         
         if adverse > max_adverse:
@@ -192,7 +230,6 @@ def open_position(pair: str, direction: str, entry_price: float, signal_price: f
         if existing["direction"] != direction:
             close_position(pair, reason="REVERSE")
         else:
-            print(f"Duplicate entry ignored: {pair}")
             return
 
     allocation = state["fund"] * ALLOCATION_PERCENT
@@ -201,7 +238,6 @@ def open_position(pair: str, direction: str, entry_price: float, signal_price: f
     actual_margin = margin - fee
 
     if actual_margin <= 0 or get_available_fund() < actual_margin:
-        print(f"Not enough fund for {pair}")
         return
 
     position = {
@@ -219,16 +255,6 @@ def open_position(pair: str, direction: str, entry_price: float, signal_price: f
     state["positions"][pair] = position
     state["stats"]["total_trades"] += 1
     save_state(state)
-
-    msg = (
-        f"🟢 NEW POSITION\n"
-        f"{pair} {direction}\n"
-        f"Entry: ${entry_price:.6f}\n"
-        f"Margin: ${actual_margin:.2f}\n"
-        f"Leverage: {LEVERAGE}x\n"
-        f"Available: ${get_available_fund():.2f}"
-    )
-    print(msg)
 
 def handle_tp(pair: str, tp_level: int, current_price: float):
     if pair not in state["positions"]:
@@ -263,11 +289,6 @@ def handle_tp(pair: str, tp_level: int, current_price: float):
     if pos["size_percent"] <= 0.1:
         state["positions"].pop(pair)
         state["stats"]["wins"] += 1
-        print(f"✅ {pair} fully closed via TP{tp_level} | +${profit:.2f}")
-    else:
-        print(f"💰 {pair} TP{tp_level} | Closed {close_amount}% | Remaining {pos['size_percent']:.0f}%")
-
-    save_state(state)
 
 def close_position(pair: str, reason: str = "MANUAL", current_price: Optional[float] = None):
     if pair not in state["positions"]:
@@ -285,24 +306,8 @@ def close_position(pair: str, reason: str = "MANUAL", current_price: Optional[fl
 
     if pnl >= 0:
         state["stats"]["wins"] += 1
-        result = "WIN"
     else:
         state["stats"]["losses"] += 1
-        result = "LOSS"
-
-    state["trade_history"].append({
-        "pair": pair,
-        "direction": pos["direction"],
-        "entry": pos["entry_price"],
-        "exit": current_price,
-        "pnl_percent": round(pnl, 2),
-        "profit_usd": round(profit, 2),
-        "result": result,
-        "reason": reason,
-        "time": datetime.now().isoformat()
-    })
-
-    print(f"{'✅' if pnl >= 0 else '❌'} CLOSED ({reason}) {pair} | PNL: {pnl:.2f}% | ${profit:.2f}")
 
     state["positions"].pop(pair)
     save_state(state)
@@ -320,38 +325,26 @@ async def check_sl(client):
                 pnl = calculate_pnl_percent(pos, current_price)
                 if pnl <= SL_PERCENT:
                     close_position(pair, reason="STOP_LOSS", current_price=current_price)
-        except Exception as e:
-            print(f"SL error: {e}")
+        except:
+            pass
         await asyncio.sleep(30)
 
 async def send_notification(client, message: str):
     try:
         await client.send_message(USER_CHAT_ID, message)
-    except Exception as e:
-        print(f"Notification error: {e}")
+    except:
+        pass
 
 # ==================== IMPROVED SL OPTIMIZATION ====================
 async def optimize_stop_loss(client, days: int = 365):
-    """Improved Stop Loss optimization with reliable historical data"""
-    
     since_date = datetime.now() - timedelta(days=days)
     
     adverse_moves = []
-    successful_analyses = 0
-    failed_analyses = 0
+    successful = 0
+    failed = 0
     
     open_positions = {}
     
-    ENTRY_PATTERN = re.compile(
-        r"(?:BINANCE|BITSTAMP):\s*(ENTER-)?(LONG|SHORT)[🟢🔴]*,?\s*([A-Z]+USDT|[A-Z]+USD)\s*,?\s*💲current price\s*=\s*([\d.]+)",
-        re.IGNORECASE
-    )
-    
-    TP_PATTERN = re.compile(
-        r"(?:BINANCE|BITSTAMP):\s*(LONG|SHORT)[🟢🔴]-TP(\d+),?\s*([A-Z]+USDT|[A-Z]+USD)\s*,?\s*💲current price\s*=\s*([\d.]+)",
-        re.IGNORECASE
-    )
-
     async for message in client.iter_messages(SIGNAL_GROUP_ID, offset_date=since_date, reverse=True):
         if not message.text:
             continue
@@ -386,59 +379,50 @@ async def optimize_stop_loss(client, days: int = 365):
             if pos["direction"] != direction:
                 continue
             
-            # Only analyze trades that reached TP2
             if tp_level == 2:
-                # Try 5-minute candles first
-                klines = get_historical_klines(pair, pos["entry_time"], timestamp, "5m")
+                klines = get_historical_klines(pair, pos["entry_time"], timestamp)
                 
-                # Fallback to 15-minute if 5-minute fails
-                if len(klines) < 5:
-                    klines = get_historical_klines(pair, pos["entry_time"], timestamp, "15m")
-                
-                if len(klines) >= 3:
+                if len(klines) >= 5:
                     max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
                     adverse_moves.append(max_adverse)
-                    successful_analyses += 1
+                    successful += 1
                 else:
-                    failed_analyses += 1
+                    failed += 1
             
             del open_positions[pair]
 
     if not adverse_moves:
         return "❌ Not enough historical price data found for meaningful analysis."
 
-    # Analyze different SL levels
-    sl_levels = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
     total = len(adverse_moves)
+    sl_levels = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
     
-    msg = f"📊 **Improved Stop Loss Optimization ({days} Days)**\n\n"
-    msg += f"**Winning Trades Analyzed:** {successful_analyses}\n"
-    msg += f"**Trades with Insufficient Data:** {failed_analyses}\n\n"
-    msg += "**Stop Loss Level Analysis:**\n"
-    msg += "SL Level | % of Winning Trades Protected | Recommendation\n"
-    msg += "---------|-----------------------------|----------------\n"
+    msg = f"📊 **SL Optimization Analysis ({days} Days)**\n\n"
+    msg += f"**Winning Trades Analyzed:** {successful}\n"
+    msg += f"**Insufficient Data:** {failed}\n\n"
+    msg += "SL Level | Protection % | Recommendation\n"
+    msg += "---------|-------------|----------------\n"
     
     best_sl = None
-    best_percentage = 0
+    best_pct = 0
     
     for sl in sl_levels:
-        protected = sum(1 for move in adverse_moves if move <= sl)
-        percentage = (protected / total) * 100
+        protected = sum(1 for m in adverse_moves if m <= sl)
+        pct = (protected / total) * 100
         
-        if percentage >= 85:
-            recommendation = "Recommended"
-            if percentage > best_percentage:
-                best_percentage = percentage
+        if pct >= 85:
+            rec = "Recommended"
+            if pct > best_pct:
+                best_pct = pct
                 best_sl = sl
-        elif percentage >= 75:
-            recommendation = "Acceptable"
+        elif pct >= 75:
+            rec = "Acceptable"
         else:
-            recommendation = "Risky"
+            rec = "Risky"
         
-        msg += f"-{sl}%     | {percentage:.1f}%                        | {recommendation}\n"
+        msg += f"-{sl}%    | {pct:.1f}%       | {rec}\n"
     
-    msg += f"\n**Best Recommended SL:** -{best_sl}% (protects ~{best_percentage:.1f}% of winning trades)\n"
-    msg += "\n**Note:** This analysis is based on actual historical price movement before TP2 was reached."
+    msg += f"\n**Recommended SL:** -{best_sl}% (protects ~{best_pct:.1f}% of winning trades)"
     
     return msg
 
@@ -518,7 +502,7 @@ async def handle_command(client, event):
                 days = int(parts[1])
             except:
                 days = 365
-        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days (this may take 1-3 minutes)...")
+        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days...")
         result = await optimize_stop_loss(client, days)
         await event.reply(result)
 

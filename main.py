@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-SL Optimization - Reliable Version (CoinGecko Only)
+SL Optimization - Improved Data Collection
 """
 
 import asyncio
@@ -136,11 +136,11 @@ def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
             "from": start_time // 1000,
             "to": end_time // 1000
         }
-        response = requests.get(url, params=params, timeout=25)
+        response = requests.get(url, params=params, timeout=30)
         if response.status_code == 200:
             data = response.json()
             prices = data.get("prices", [])
-            if len(prices) < 5:
+            if len(prices) < 8:  # Require at least 8 data points
                 return []
             klines = []
             for i in range(len(prices)):
@@ -331,7 +331,7 @@ async def send_notification(client, message: str):
     except:
         pass
 
-# ==================== RELIABLE SL OPTIMIZATION ====================
+# ==================== IMPROVED SL OPTIMIZATION ====================
 async def optimize_stop_loss(client, days: int = 365):
     since_date = datetime.now() - timedelta(days=days)
     
@@ -375,11 +375,10 @@ async def optimize_stop_loss(client, days: int = 365):
             if pos["direction"] != direction:
                 continue
             
-            # Include TP1 and TP2
             if tp_level in [1, 2]:
                 klines = get_historical_klines(pair, pos["entry_time"], timestamp)
                 
-                if len(klines) >= 5:
+                if len(klines) >= 8:  # Require minimum 8 data points
                     max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
                     adverse_moves.append(max_adverse)
                     successful += 1

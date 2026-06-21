@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-SL Optimization - Target 20 Winning Trades
+SL Optimization - Reliable Version (CoinGecko Only)
 """
 
 import asyncio
@@ -331,8 +331,8 @@ async def send_notification(client, message: str):
     except:
         pass
 
-# ==================== IMPROVED SL OPTIMIZATION (Target 20 Trades) ====================
-async def optimize_stop_loss(client, days: int = 365, target_trades: int = 20):
+# ==================== RELIABLE SL OPTIMIZATION ====================
+async def optimize_stop_loss(client, days: int = 365):
     since_date = datetime.now() - timedelta(days=days)
     
     adverse_moves = []
@@ -375,7 +375,7 @@ async def optimize_stop_loss(client, days: int = 365, target_trades: int = 20):
             if pos["direction"] != direction:
                 continue
             
-            # Include both TP1 and TP2 to reach 20 trades faster
+            # Include TP1 and TP2
             if tp_level in [1, 2]:
                 klines = get_historical_klines(pair, pos["entry_time"], timestamp)
                 
@@ -383,10 +383,6 @@ async def optimize_stop_loss(client, days: int = 365, target_trades: int = 20):
                     max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
                     adverse_moves.append(max_adverse)
                     successful += 1
-                    
-                    # Stop when we reach target
-                    if successful >= target_trades:
-                        break
                 else:
                     failed += 1
             
@@ -399,7 +395,6 @@ async def optimize_stop_loss(client, days: int = 365, target_trades: int = 20):
     sl_levels = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
     
     msg = f"📊 **SL Optimization Analysis ({days} Days)**\n\n"
-    msg += f"**Target Winning Trades:** {target_trades}\n"
     msg += f"**Winning Trades Analyzed:** {successful}\n"
     msg += f"**Insufficient Data:** {failed}\n\n"
     msg += "SL Level | Protection % | Recommendation\n"
@@ -443,8 +438,8 @@ async def handle_command(client, event):
                 days = int(parts[1])
             except:
                 days = 365
-        await event.reply(f"🔄 Analyzing optimal Stop Loss (target: 20 trades) for the last {days} days...")
-        result = await optimize_stop_loss(client, days, target_trades=20)
+        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days...")
+        result = await optimize_stop_loss(client, days)
         await event.reply(result)
 
     elif text == "/help":

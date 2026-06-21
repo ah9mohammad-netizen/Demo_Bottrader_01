@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With SL Optimization Analysis
+With Improved SL Optimization Analysis (Reliable Historical Price Check)
 """
 
 import asyncio
@@ -93,8 +93,9 @@ def get_binance_price(symbol: str) -> Optional[float]:
         print(f"Price error for {symbol}: {e}")
         return None
 
-# ==================== HISTORICAL PRICE ====================
-def get_historical_klines(symbol: str, start_time: int, end_time: int, interval: str = "1m") -> List:
+# ==================== IMPROVED HISTORICAL PRICE FETCHER ====================
+def get_historical_klines(symbol: str, start_time: int, end_time: int, interval: str = "5m") -> List:
+    """Fetch historical kline data from Binance (5m or 15m for better coverage)"""
     try:
         clean_symbol = symbol.upper().replace("USDT", "").replace("USD", "")
         test_symbol = clean_symbol + "USDT"
@@ -108,17 +109,19 @@ def get_historical_klines(symbol: str, start_time: int, end_time: int, interval:
             "limit": 1000
         }
         
-        response = requests.get(url, params=params, timeout=15)
+        response = requests.get(url, params=params, timeout=20)
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            if len(data) > 0:
+                return data
         return []
     except Exception as e:
         print(f"Historical price error for {symbol}: {e}")
         return []
 
 def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> float:
-    """Calculate maximum adverse price movement (in %)"""
-    if not klines:
+    """Calculate maximum adverse price movement in percentage"""
+    if not klines or len(klines) < 2:
         return 0.0
     
     max_adverse = 0.0
@@ -128,12 +131,12 @@ def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> fl
         high = float(kline[2])
         
         if direction == "LONG":
-            adverse_move = ((entry_price - low) / entry_price) * 100
-        else:
-            adverse_move = ((high - entry_price) / entry_price) * 100
+            adverse = ((entry_price - low) / entry_price) * 100
+        else:  # SHORT
+            adverse = ((high - entry_price) / entry_price) * 100
         
-        if adverse_move > max_adverse:
-            max_adverse = adverse_move
+        if adverse > max_adverse:
+            max_adverse = adverse
     
     return round(max_adverse, 2)
 
@@ -327,13 +330,15 @@ async def send_notification(client, message: str):
     except Exception as e:
         print(f"Notification error: {e}")
 
-# ==================== SL OPTIMIZATION ANALYSIS ====================
+# ==================== IMPROVED SL OPTIMIZATION ====================
 async def optimize_stop_loss(client, days: int = 365):
-    """Analyze optimal Stop Loss level based on historical adverse moves"""
+    """Improved Stop Loss optimization with reliable historical data"""
     
     since_date = datetime.now() - timedelta(days=days)
     
-    adverse_moves = []  # Store max adverse move for winning trades
+    adverse_moves = []
+    successful_analyses = 0
+    failed_analyses = 0
     
     open_positions = {}
     
@@ -381,49 +386,59 @@ async def optimize_stop_loss(client, days: int = 365):
             if pos["direction"] != direction:
                 continue
             
-            # Only consider trades that reached TP2
+            # Only analyze trades that reached TP2
             if tp_level == 2:
-                # Fetch historical prices
-                klines = get_historical_klines(pair, pos["entry_time"], timestamp)
+                # Try 5-minute candles first
+                klines = get_historical_klines(pair, pos["entry_time"], timestamp, "5m")
                 
-                # Calculate max adverse move
-                max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
-                adverse_moves.append(max_adverse)
+                # Fallback to 15-minute if 5-minute fails
+                if len(klines) < 5:
+                    klines = get_historical_klines(pair, pos["entry_time"], timestamp, "15m")
+                
+                if len(klines) >= 3:
+                    max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
+                    adverse_moves.append(max_adverse)
+                    successful_analyses += 1
+                else:
+                    failed_analyses += 1
             
             del open_positions[pair]
 
     if not adverse_moves:
-        return "❌ Not enough data to analyze Stop Loss levels."
+        return "❌ Not enough historical price data found for meaningful analysis."
 
     # Analyze different SL levels
-    sl_levels = [0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
+    sl_levels = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
+    total = len(adverse_moves)
     
-    total_winning_trades = len(adverse_moves)
+    msg = f"📊 **Improved Stop Loss Optimization ({days} Days)**\n\n"
+    msg += f"**Winning Trades Analyzed:** {successful_analyses}\n"
+    msg += f"**Trades with Insufficient Data:** {failed_analyses}\n\n"
+    msg += "**Stop Loss Level Analysis:**\n"
+    msg += "SL Level | % of Winning Trades Protected | Recommendation\n"
+    msg += "---------|-----------------------------|----------------\n"
     
-    msg = f"📊 **Stop Loss Optimization Analysis ({days} Days)**\n\n"
-    msg += f"**Total Winning Trades Analyzed:** {total_winning_trades}\n\n"
-    msg += "**SL Level Analysis:**\n"
-    msg += "SL Level | % of Winning Trades Protected | Risk Level\n"
-    msg += "---------|-----------------------------|------------\n"
+    best_sl = None
+    best_percentage = 0
     
     for sl in sl_levels:
-        trades_protected = sum(1 for move in adverse_moves if move <= sl)
-        percentage = (trades_protected / total_winning_trades) * 100
+        protected = sum(1 for move in adverse_moves if move <= sl)
+        percentage = (protected / total) * 100
         
-        if percentage >= 90:
-            risk = "Very Safe"
-        elif percentage >= 80:
-            risk = "Safe"
-        elif percentage >= 70:
-            risk = "Balanced"
+        if percentage >= 85:
+            recommendation = "Recommended"
+            if percentage > best_percentage:
+                best_percentage = percentage
+                best_sl = sl
+        elif percentage >= 75:
+            recommendation = "Acceptable"
         else:
-            risk = "Risky"
+            recommendation = "Risky"
         
-        msg += f"-{sl}%     | {percentage:.1f}%                        | {risk}\n"
+        msg += f"-{sl}%     | {percentage:.1f}%                        | {recommendation}\n"
     
-    msg += "\n**Recommendation:**\n"
-    msg += "Choose an SL level that protects at least 80-85% of your winning trades.\n"
-    msg += "A good starting point is usually between **-1.0%** and **-1.5%**."
+    msg += f"\n**Best Recommended SL:** -{best_sl}% (protects ~{best_percentage:.1f}% of winning trades)\n"
+    msg += "\n**Note:** This analysis is based on actual historical price movement before TP2 was reached."
     
     return msg
 
@@ -503,7 +518,7 @@ async def handle_command(client, event):
                 days = int(parts[1])
             except:
                 days = 365
-        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days (this may take a while)...")
+        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days (this may take 1-3 minutes)...")
         result = await optimize_stop_loss(client, days)
         await event.reply(result)
 

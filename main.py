@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-SL Optimization - CoinGecko Only (No Binance)
+SL Optimization - Target 20 Winning Trades
 """
 
 import asyncio
@@ -11,7 +11,7 @@ import re
 import requests
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Set
+from typing import Dict, Optional, List
 
 from flask import Flask
 from telethon import TelegramClient, events
@@ -76,7 +76,7 @@ def save_state(state: Dict):
 
 state = load_state()
 
-# ==================== BINANCE PRICE (only for live price) ====================
+# ==================== BINANCE PRICE ====================
 def get_binance_price(symbol: str) -> Optional[float]:
     try:
         for suffix in ["USDT", "USD"]:
@@ -114,14 +114,8 @@ COINGECKO_ID_MAP = {
     "MANA": "decentraland", "SAND": "the-sandbox", "AXS": "axie-infinity",
     "CHZ": "chiliz", "GALA": "gala", "ILV": "illuvium", "PIXEL": "pixels",
     "PORTAL": "portal", "MAVIA": "mavaverse", "PRIME": "echelon-prime",
-    "DYM": "dymension", "STRK": "starknet", "ZETA": "zetachain",
-    "OMNI": "omni-network", "REZ": "renzo", "ETHFI": "ether-fi",
-    "BOME": "book-of-meme", "MAGA": "maga", "MOG": "mog-coin",
-    "BRETT": "based-brett", "TOSHI": "toshi", "DEGEN": "degen-base",
-    "HIGHER": "higher", "MOODENG": "moo-deng", "PNUT": "peanut-the-squirrel",
-    "GOAT": "goatseus-maximus", "ACT": "act-i-the-ai-prophecy",
-    "FARTCOIN": "fartcoin", "POPCAT": "popcat", "MEW": "cat-in-a-dogs-world",
-    "BOME": "book-of-meme", "GME": "gme", "TRUMP": "maga", "MAGA": "maga",
+    "DYM": "dymension", "ZETA": "zetachain", "OMNI": "omni-network",
+    "REZ": "renzo", "ETHFI": "ether-fi", "BOME": "book-of-meme",
     "MOG": "mog-coin", "BRETT": "based-brett", "TOSHI": "toshi",
     "DEGEN": "degen-base", "HIGHER": "higher", "MOODENG": "moo-deng",
     "PNUT": "peanut-the-squirrel", "GOAT": "goatseus-maximus",
@@ -134,7 +128,6 @@ def get_coingecko_id(symbol: str) -> str:
     return COINGECKO_ID_MAP.get(clean, clean.lower())
 
 def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
-    """Fetch historical data from CoinGecko"""
     try:
         coin_id = get_coingecko_id(symbol)
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
@@ -149,8 +142,6 @@ def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
             prices = data.get("prices", [])
             if len(prices) < 5:
                 return []
-            
-            # Convert to kline format
             klines = []
             for i in range(len(prices)):
                 ts = prices[i][0]
@@ -158,12 +149,10 @@ def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
                 klines.append([ts, price, price, price, price])
             return klines
         return []
-    except Exception as e:
-        print(f"CoinGecko error for {symbol}: {e}")
+    except:
         return []
 
 def get_historical_klines(symbol: str, start_time: int, end_time: int) -> List:
-    """Main function - CoinGecko only"""
     return get_coingecko_klines(symbol, start_time, end_time)
 
 def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> float:
@@ -342,8 +331,8 @@ async def send_notification(client, message: str):
     except:
         pass
 
-# ==================== SL OPTIMIZATION ====================
-async def optimize_stop_loss(client, days: int = 365):
+# ==================== IMPROVED SL OPTIMIZATION (Target 20 Trades) ====================
+async def optimize_stop_loss(client, days: int = 365, target_trades: int = 20):
     since_date = datetime.now() - timedelta(days=days)
     
     adverse_moves = []
@@ -386,13 +375,18 @@ async def optimize_stop_loss(client, days: int = 365):
             if pos["direction"] != direction:
                 continue
             
-            if tp_level == 2:
+            # Include both TP1 and TP2 to reach 20 trades faster
+            if tp_level in [1, 2]:
                 klines = get_historical_klines(pair, pos["entry_time"], timestamp)
                 
                 if len(klines) >= 5:
                     max_adverse = get_max_adverse_move(pos["entry_price"], direction, klines)
                     adverse_moves.append(max_adverse)
                     successful += 1
+                    
+                    # Stop when we reach target
+                    if successful >= target_trades:
+                        break
                 else:
                     failed += 1
             
@@ -405,6 +399,7 @@ async def optimize_stop_loss(client, days: int = 365):
     sl_levels = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
     
     msg = f"📊 **SL Optimization Analysis ({days} Days)**\n\n"
+    msg += f"**Target Winning Trades:** {target_trades}\n"
     msg += f"**Winning Trades Analyzed:** {successful}\n"
     msg += f"**Insufficient Data:** {failed}\n\n"
     msg += "SL Level | Protection % | Recommendation\n"
@@ -448,8 +443,8 @@ async def handle_command(client, event):
                 days = int(parts[1])
             except:
                 days = 365
-        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days (using CoinGecko)...")
-        result = await optimize_stop_loss(client, days)
+        await event.reply(f"🔄 Analyzing optimal Stop Loss (target: 20 trades) for the last {days} days...")
+        result = await optimize_stop_loss(client, days, target_trades=20)
         await event.reply(result)
 
     elif text == "/help":

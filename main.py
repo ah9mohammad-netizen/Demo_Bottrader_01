@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Demo Trading Bot
-With Improved SL Optimization (Binance + CoinGecko Fallback)
+SL Optimization - CoinGecko Only (No Binance)
 """
 
 import asyncio
@@ -11,7 +11,7 @@ import re
 import requests
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
 
 from flask import Flask
 from telethon import TelegramClient, events
@@ -39,7 +39,6 @@ if not SESSION_STRING:
     print("❌ ERROR: SESSION_STRING not found!")
     exit(1)
 
-# Demo trading rules
 STARTING_FUND = 100.0
 RESERVED_PERCENT = 0.10
 ALLOCATION_PERCENT = 0.05
@@ -51,7 +50,6 @@ SL_PERCENT = -1.0
 
 STATE_FILE = "state.json"
 
-# ==================== STATE ====================
 def load_state() -> Dict:
     try:
         with open(STATE_FILE, "r") as f:
@@ -78,7 +76,7 @@ def save_state(state: Dict):
 
 state = load_state()
 
-# ==================== BINANCE PRICE ====================
+# ==================== BINANCE PRICE (only for live price) ====================
 def get_binance_price(symbol: str) -> Optional[float]:
     try:
         for suffix in ["USDT", "USD"]:
@@ -92,51 +90,67 @@ def get_binance_price(symbol: str) -> Optional[float]:
     except:
         return None
 
-# ==================== HISTORICAL PRICE (Binance + CoinGecko) ====================
-def get_binance_klines(symbol: str, start_time: int, end_time: int, interval: str = "15m") -> List:
-    try:
-        clean = symbol.upper().replace("USDT", "").replace("USD", "")
-        for suffix in ["USDT", "USD"]:
-            test_symbol = clean + suffix
-            url = "https://api.binance.com/api/v3/klines"
-            params = {
-                "symbol": test_symbol,
-                "interval": interval,
-                "startTime": start_time,
-                "endTime": end_time,
-                "limit": 1000
-            }
-            response = requests.get(url, params=params, timeout=20)
-            if response.status_code == 200:
-                data = response.json()
-                if len(data) >= 5:
-                    return data
-        return []
-    except:
-        return []
+# ==================== COINGECKO HISTORICAL DATA ====================
+COINGECKO_ID_MAP = {
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
+    "BNB": "binancecoin", "XRP": "ripple", "DOGE": "dogecoin",
+    "TON": "the-open-network", "NOT": "notcoin", "PEPE": "pepe",
+    "SHIB": "shiba-inu", "ADA": "cardano", "AVAX": "avalanche-2",
+    "LINK": "chainlink", "LTC": "litecoin", "BCH": "bitcoin-cash",
+    "DOT": "polkadot", "NEAR": "near", "APT": "aptos", "SUI": "sui",
+    "AR": "arweave", "OP": "optimism", "ARB": "arbitrum", "INJ": "injective-protocol",
+    "SEI": "sei-network", "JUP": "jupiter-exchange-solana", "WIF": "dogwifcoin",
+    "BONK": "bonk", "FLOKI": "floki", "MEME": "memecoin-2",
+    "ORDI": "ordinals", "RUNE": "thorchain", "DYDX": "dydx-chain",
+    "STRK": "starknet", "TIA": "celestia", "JTO": "jito-governance",
+    "PYTH": "pyth-network", "W": "wormhole", "AEVO": "aevo",
+    "ALT": "altlayer", "ZRO": "layerzero", "IO": "io-net",
+    "TAO": "bittensor", "FET": "fetch-ai", "RNDR": "render-token",
+    "GRT": "the-graph", "IMX": "immutable-x", "LDO": "lido-dao",
+    "AAVE": "aave", "UNI": "uniswap", "MKR": "maker", "SNX": "synthetix-network-token",
+    "CRV": "curve-dao-token", "COMP": "compound-governance-token",
+    "YFI": "yearn-finance", "SUSHI": "sushi", "1INCH": "1inch",
+    "ZRX": "0x", "BAT": "basic-attention-token", "ENJ": "enjincoin",
+    "MANA": "decentraland", "SAND": "the-sandbox", "AXS": "axie-infinity",
+    "CHZ": "chiliz", "GALA": "gala", "ILV": "illuvium", "PIXEL": "pixels",
+    "PORTAL": "portal", "MAVIA": "mavaverse", "PRIME": "echelon-prime",
+    "DYM": "dymension", "STRK": "starknet", "ZETA": "zetachain",
+    "OMNI": "omni-network", "REZ": "renzo", "ETHFI": "ether-fi",
+    "BOME": "book-of-meme", "MAGA": "maga", "MOG": "mog-coin",
+    "BRETT": "based-brett", "TOSHI": "toshi", "DEGEN": "degen-base",
+    "HIGHER": "higher", "MOODENG": "moo-deng", "PNUT": "peanut-the-squirrel",
+    "GOAT": "goatseus-maximus", "ACT": "act-i-the-ai-prophecy",
+    "FARTCOIN": "fartcoin", "POPCAT": "popcat", "MEW": "cat-in-a-dogs-world",
+    "BOME": "book-of-meme", "GME": "gme", "TRUMP": "maga", "MAGA": "maga",
+    "MOG": "mog-coin", "BRETT": "based-brett", "TOSHI": "toshi",
+    "DEGEN": "degen-base", "HIGHER": "higher", "MOODENG": "moo-deng",
+    "PNUT": "peanut-the-squirrel", "GOAT": "goatseus-maximus",
+    "ACT": "act-i-the-ai-prophecy", "FARTCOIN": "fartcoin",
+    "POPCAT": "popcat", "MEW": "cat-in-a-dogs-world"
+}
+
+def get_coingecko_id(symbol: str) -> str:
+    clean = symbol.upper().replace("USDT", "").replace("USD", "")
+    return COINGECKO_ID_MAP.get(clean, clean.lower())
 
 def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
+    """Fetch historical data from CoinGecko"""
     try:
-        mapping = {
-            "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
-            "BNB": "binancecoin", "XRP": "ripple", "DOGE": "dogecoin",
-            "TON": "the-open-network", "NOT": "notcoin", "PEPE": "pepe",
-            "SHIB": "shiba-inu", "ADA": "cardano", "AVAX": "avalanche-2",
-            "LINK": "chainlink", "LTC": "litecoin"
-        }
-        clean = symbol.upper().replace("USDT", "").replace("USD", "")
-        coin_id = mapping.get(clean, clean.lower())
-        
+        coin_id = get_coingecko_id(symbol)
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart/range"
         params = {
             "vs_currency": "usd",
             "from": start_time // 1000,
             "to": end_time // 1000
         }
-        response = requests.get(url, params=params, timeout=20)
+        response = requests.get(url, params=params, timeout=25)
         if response.status_code == 200:
             data = response.json()
             prices = data.get("prices", [])
+            if len(prices) < 5:
+                return []
+            
+            # Convert to kline format
             klines = []
             for i in range(len(prices)):
                 ts = prices[i][0]
@@ -144,20 +158,13 @@ def get_coingecko_klines(symbol: str, start_time: int, end_time: int) -> List:
                 klines.append([ts, price, price, price, price])
             return klines
         return []
-    except:
+    except Exception as e:
+        print(f"CoinGecko error for {symbol}: {e}")
         return []
 
 def get_historical_klines(symbol: str, start_time: int, end_time: int) -> List:
-    """Try Binance first, then CoinGecko"""
-    klines = get_binance_klines(symbol, start_time, end_time, "15m")
-    if len(klines) >= 5:
-        return klines
-    
-    klines = get_coingecko_klines(symbol, start_time, end_time)
-    if len(klines) >= 5:
-        return klines
-    
-    return []
+    """Main function - CoinGecko only"""
+    return get_coingecko_klines(symbol, start_time, end_time)
 
 def get_max_adverse_move(entry_price: float, direction: str, klines: List) -> float:
     if not klines or len(klines) < 2:
@@ -335,7 +342,7 @@ async def send_notification(client, message: str):
     except:
         pass
 
-# ==================== IMPROVED SL OPTIMIZATION ====================
+# ==================== SL OPTIMIZATION ====================
 async def optimize_stop_loss(client, days: int = 365):
     since_date = datetime.now() - timedelta(days=days)
     
@@ -392,7 +399,7 @@ async def optimize_stop_loss(client, days: int = 365):
             del open_positions[pair]
 
     if not adverse_moves:
-        return "❌ Not enough historical price data found for meaningful analysis."
+        return "❌ Not enough historical price data found from CoinGecko."
 
     total = len(adverse_moves)
     sl_levels = [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0]
@@ -431,68 +438,7 @@ async def handle_command(client, event):
     text = event.raw_text.strip().lower()
 
     if text == "/start":
-        await event.reply("✅ Bot activated! You will receive trade notifications here.\n\nUse /balance, /stats, /positions, /closeall, /analyze, /optimize_sl, /help")
-
-    elif text == "/balance":
-        used = sum(p["margin"] for p in state["positions"].values())
-        available = state["fund"] - state["reserved"] - used
-        msg = (
-            f"💰 <b>Account Balance</b>\n"
-            f"Total Fund: ${state['fund']:.2f}\n"
-            f"Reserved (10%): ${state['reserved']:.2f}\n"
-            f"Used in Positions: ${used:.2f}\n"
-            f"Available: ${available:.2f}"
-        )
-        await event.reply(msg, parse_mode="html")
-
-    elif text == "/stats":
-        s = state["stats"]
-        winrate = (s["wins"] / s["total_trades"] * 100) if s["total_trades"] > 0 else 0
-        msg = (
-            f"📊 <b>Trading Stats</b>\n"
-            f"Total Trades: {s['total_trades']}\n"
-            f"Wins: {s['wins']} | Losses: {s['losses']}\n"
-            f"Winrate: {winrate:.1f}%\n"
-            f"Total PNL: ${s['total_pnl']:.2f}"
-        )
-        await event.reply(msg, parse_mode="html")
-
-    elif text == "/positions":
-        if not state["positions"]:
-            await event.reply("No open positions.")
-            return
-
-        msg = "📍 <b>Open Positions</b>\n\n"
-        for pair, pos in state["positions"].items():
-            current = get_binance_price(pair) or pos["entry_price"]
-            pnl = calculate_pnl_percent(pos, current)
-            msg += (
-                f"{pair} {pos['direction']}\n"
-                f"Entry: ${pos['entry_price']:.6f} | Current: ${current:.6f}\n"
-                f"Margin: ${pos['margin']:.2f} | Lev: {pos['leverage']}x\n"
-                f"Remaining: {pos['size_percent']:.0f}% | PNL: {pnl:.2f}%\n\n"
-            )
-        await event.reply(msg, parse_mode="html")
-
-    elif text == "/closeall":
-        if not state["positions"]:
-            await event.reply("No positions to close.")
-            return
-        for pair in list(state["positions"].keys()):
-            close_position(pair, reason="MANUAL")
-        await event.reply("All positions closed.")
-
-    elif text.startswith("/analyze"):
-        parts = text.split()
-        days = 365
-        if len(parts) > 1:
-            try:
-                days = int(parts[1])
-            except:
-                days = 365
-        await event.reply(f"🔄 Running simulation for the last {days} days...")
-        result = await simulate_trading_strategy(client, days)
-        await event.reply(result)
+        await event.reply("✅ Bot activated!")
 
     elif text.startswith("/optimize_sl"):
         parts = text.split()
@@ -502,24 +448,12 @@ async def handle_command(client, event):
                 days = int(parts[1])
             except:
                 days = 365
-        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days...")
+        await event.reply(f"🔄 Analyzing optimal Stop Loss for the last {days} days (using CoinGecko)...")
         result = await optimize_stop_loss(client, days)
         await event.reply(result)
 
     elif text == "/help":
-        await event.reply(
-            "Commands:\n"
-            "/balance - Show fund\n"
-            "/stats - Trading statistics\n"
-            "/positions - Open positions\n"
-            "/closeall - Close everything\n"
-            "/analyze [days] - Strategy simulation\n"
-            "/optimize_sl [days] - Find best Stop Loss level\n"
-            "/help - This message"
-        )
-
-    else:
-        await event.reply("Unknown command. Use /help")
+        await event.reply("/optimize_sl [days] - Find best Stop Loss level")
 
 # ==================== MAIN ====================
 async def main():
@@ -528,32 +462,13 @@ async def main():
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await client.start()
 
-    print("✅ Successfully logged in with session string")
-
-    await send_notification(client, "✅ Crypto Demo Bot is now running and listening to signals.")
-
-    asyncio.create_task(check_sl(client))
-
-    @client.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
-    async def signal_handler(event):
-        signal = parse_signal(event.raw_text)
-        if not signal:
-            return
-
-        pair = signal["pair"]
-        direction = signal["direction"]
-        price = signal["signal_price"]
-
-        if signal["type"] == "entry":
-            open_position(pair, direction, price, price)
-        elif signal["type"] == "tp":
-            handle_tp(pair, signal["tp_level"], price)
+    print("✅ Successfully logged in")
 
     @client.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/'))
     async def command_handler(event):
         await handle_command(client, event)
 
-    print("👂 Listening for signals and commands...")
+    print("👂 Listening for commands...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":

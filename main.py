@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Trading Bot
-Main Brain - Full Strategy + Reverse Signal + Real Sizing
+Main Brain - Full Strategy + TP Listening
 """
 
 import asyncio
@@ -56,8 +56,8 @@ cooldown_until = None
 cooldown_count = 0
 last_trade_date = None
 
-# Track open trades for TP1 monitoring and reverse signal handling
-open_trades = {}   # symbol -> trade details
+# Track open trades for TP1 monitoring
+open_trades = {}
 
 # ==================== TELEGRAM ====================
 bot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -85,14 +85,7 @@ def check_risk_rules():
     return True, "OK"
 
 def calculate_position_size():
-    """Calculate 5% of available contract balance"""
-    try:
-        balance = apex.get_contract_balance()
-        available = balance * 0.9  # Keep 10% reserved
-        size = round(available * ALLOCATION_PERCENT, 2)
-        return str(max(size, 5))  # Minimum size safety
-    except:
-        return "10"
+    return "10"
 
 # ==================== SIGNAL HANDLING ====================
 ENTRY_PATTERN = re.compile(
@@ -100,69 +93,88 @@ ENTRY_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+TP_PATTERN = re.compile(
+    r"(?:BINANCE|BITSTAMP):\s*(LONG|SHORT)[🟢🔴]-TP(\d+),?\s*([A-Z]+USDT)\s*,?\s*💲current price\s*=\s*([\d.]+)",
+    re.IGNORECASE
+)
+
 @bot.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
 async def on_signal(event):
     global consecutive_losses
 
-    match = ENTRY_PATTERN.search(event.raw_text)
-    if not match:
+    text = event.raw_text
+
+    # === ENTRY SIGNAL ===
+    match = ENTRY_PATTERN.search(text)
+    if match:
+        direction = match.group(2).upper()
+        pair = match.group(3).upper()
+        entry_price = float(match.group(4))
+
+        can_trade, reason = check_risk_rules()
+        if not can_trade:
+            await bot.send_message(USER_CHAT_ID, f"⚠️ Trade blocked: {reason}")
+            return
+
+        side = "SELL" if direction == "SHORT" else "BUY"
+        symbol = pair.replace("USDT", "-USDT")
+
+        # Calculate TP2 and SL
+        if direction == "SHORT":
+            tp2 = round(entry_price * (1 - TP2_PERCENT / 100), 6)
+            sl = round(entry_price * (1 + SL_PERCENT / 100), 6)
+        else:
+            tp2 = round(entry_price * (1 + TP2_PERCENT / 100), 6)
+            sl = round(entry_price * (1 - SL_PERCENT / 100), 6)
+
+        size = calculate_position_size()
+
+        result = apex.place_market_order_with_tp_sl(
+            symbol=symbol,
+            side=side,
+            size=size,
+            leverage=LEVERAGE,
+            tp_price=str(tp2),
+            sl_price=str(sl)
+        )
+
+        if result:
+            open_trades[symbol] = {
+                "entry_price": entry_price,
+                "tp2": tp2,
+                "sl": sl,
+                "size": size,
+                "side": side,
+                "remaining_size": size
+            }
+            await bot.send_message(USER_CHAT_ID, f"✅ Opened {direction} {symbol}")
+        else:
+            await bot.send_message(USER_CHAT_ID, "❌ Failed to open position")
         return
 
-    direction = match.group(2).upper()
-    pair = match.group(3).upper()
-    entry_price = float(match.group(4))
+    # === TP SIGNAL HANDLING ===
+    tp_match = TP_PATTERN.search(text)
+    if tp_match:
+        direction = tp_match.group(1).upper()
+        tp_level = int(tp_match.group(2))
+        pair = tp_match.group(3).upper()
+        symbol = pair.replace("USDT", "-USDT")
 
-    can_trade, reason = check_risk_rules()
-    if not can_trade:
-        await bot.send_message(USER_CHAT_ID, f"⚠️ Trade blocked: {reason}")
-        return
+        if symbol in open_trades:
+            trade = open_trades[symbol]
 
-    side = "SELL" if direction == "SHORT" else "BUY"
-    symbol = pair.replace("USDT", "-USDT")
+            if tp_level == 1:
+                # Close 50% at TP1
+                half_size = str(float(trade["size"]) * 0.5)
+                apex.close_partial_position(symbol, half_size)
+                trade["remaining_size"] = str(float(trade["size"]) * 0.5)
+                await bot.send_message(USER_CHAT_ID, f"💰 TP1 hit on {symbol} - 50% closed")
 
-    # === Reverse Signal Handling ===
-    if symbol in open_trades:
-        existing = open_trades[symbol]
-        if existing["side"] != side:
-            # Close existing position first
-            await bot.send_message(USER_CHAT_ID, f"🔄 Reverse signal detected on {symbol}. Closing existing position...")
-            apex.close_partial_position(symbol, existing["remaining_size"])
-            del open_trades[symbol]
-
-    # Calculate TP & SL
-    if direction == "SHORT":
-        tp1 = round(entry_price * (1 - TP1_PERCENT / 100), 6)
-        tp2 = round(entry_price * (1 - TP2_PERCENT / 100), 6)
-        sl = round(entry_price * (1 + SL_PERCENT / 100), 6)
-    else:
-        tp1 = round(entry_price * (1 + TP1_PERCENT / 100), 6)
-        tp2 = round(entry_price * (1 + TP2_PERCENT / 100), 6)
-        sl = round(entry_price * (1 - SL_PERCENT / 100), 6)
-
-    size = calculate_position_size()
-
-    result = apex.place_market_order_with_tp_sl(
-        symbol=symbol,
-        side=side,
-        size=size,
-        leverage=LEVERAGE,
-        tp_price=str(tp2),
-        sl_price=str(sl)
-    )
-
-    if result:
-        open_trades[symbol] = {
-            "entry_price": entry_price,
-            "tp1": tp1,
-            "tp2": tp2,
-            "sl": sl,
-            "size": size,
-            "side": side,
-            "remaining_size": size
-        }
-        await bot.send_message(USER_CHAT_ID, f"✅ Opened {direction} {symbol}")
-    else:
-        await bot.send_message(USER_CHAT_ID, "❌ Failed to open position")
+            elif tp_level == 2:
+                # Close remaining at TP2
+                apex.close_partial_position(symbol, trade["remaining_size"])
+                del open_trades[symbol]
+                await bot.send_message(USER_CHAT_ID, f"💰 TP2 hit on {symbol} - Position closed")
 
 # ==================== COMMANDS ====================
 @bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/status'))

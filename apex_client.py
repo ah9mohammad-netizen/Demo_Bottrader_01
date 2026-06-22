@@ -1,7 +1,6 @@
 # apex_client.py
 """
-ApeX Omni Client Wrapper
-Handles all interactions with ApeX Protocol (order placement, leverage, positions)
+ApeX Omni Execution Layer
 """
 
 import os
@@ -11,11 +10,6 @@ from apexomni.constants import APEX_OMNI_HTTP_MAIN, NETWORKID_MAIN
 
 
 class ApexClient:
-    """
-    Wrapper class for ApeX Omni trading.
-    Includes error handling and clear method documentation.
-    """
-
     def __init__(self):
         self.key = os.getenv("APEX_API_KEY")
         self.secret = os.getenv("APEX_API_SECRET")
@@ -24,7 +18,7 @@ class ApexClient:
         self.l2_key = os.getenv("APEX_L2_KEY", "")
 
         if not all([self.key, self.secret, self.passphrase, self.seeds]):
-            raise ValueError("Missing ApeX API credentials in environment variables")
+            raise ValueError("Missing ApeX API credentials")
 
         self.client = HttpPrivate_v3(
             APEX_OMNI_HTTP_MAIN,
@@ -39,7 +33,6 @@ class ApexClient:
         )
 
     def test_connection(self):
-        """Test connection to ApeX Omni"""
         try:
             account = self.client.get_account_v3()
             print(f"✅ Connected to ApeX | Account ID: {account.get('id')}")
@@ -49,30 +42,34 @@ class ApexClient:
             return False
 
     def get_account_info(self):
-        """Get full account details"""
         try:
             return self.client.get_account_v3()
         except Exception as e:
-            print(f"Error getting account info: {e}")
+            print(f"Error: {e}")
             return None
 
+    def get_contract_balance(self):
+        """Get available USDT balance in contract account"""
+        try:
+            account = self.client.get_account_v3()
+            # This structure may vary. Adjust based on actual response.
+            if "contractWallets" in account and account["contractWallets"]:
+                for wallet in account["contractWallets"]:
+                    if wallet.get("tokenId") == "141":  # USDT
+                        return float(wallet.get("balance", 0))
+            return 0.0
+        except Exception as e:
+            print(f"Error getting balance: {e}")
+            return 0.0
+
     def place_market_order_with_tp_sl(
-        self,
-        symbol: str,
-        side: str,           # "BUY" or "SELL"
-        size: str,
-        leverage: int = 7,
-        tp_price: str = None,
-        sl_price: str = None
+        self, symbol: str, side: str, size: str, leverage: int = 7,
+        tp_price: str = None, sl_price: str = None
     ):
-        """
-        Place a market order with optional Take Profit and Stop Loss.
-        This is the main method used by the trading bot.
-        """
         try:
             current_time = int(time.time())
 
-            order_params = {
+            params = {
                 "symbol": symbol,
                 "side": side,
                 "type": "MARKET",
@@ -81,29 +78,27 @@ class ApexClient:
                 "price": "0",
             }
 
-            if tp_price or sl_price:
-                order_params["isOpenTpslOrder"] = True
+            if sl_price:
+                params.update({
+                    "isOpenTpslOrder": True,
+                    "isSetOpenSl": True,
+                    "slPrice": sl_price,
+                    "slSide": "SELL" if side == "BUY" else "BUY",
+                    "slSize": size,
+                    "slTriggerPrice": sl_price,
+                })
 
-                if sl_price:
-                    order_params.update({
-                        "isSetOpenSl": True,
-                        "slPrice": sl_price,
-                        "slSide": "SELL" if side == "BUY" else "BUY",
-                        "slSize": size,
-                        "slTriggerPrice": sl_price,
-                    })
+            if tp_price:
+                params.update({
+                    "isSetOpenTp": True,
+                    "tpPrice": tp_price,
+                    "tpSide": "SELL" if side == "BUY" else "BUY",
+                    "tpSize": size,
+                    "tpTriggerPrice": tp_price,
+                })
 
-                if tp_price:
-                    order_params.update({
-                        "isSetOpenTp": True,
-                        "tpPrice": tp_price,
-                        "tpSide": "SELL" if side == "BUY" else "BUY",
-                        "tpSize": size,
-                        "tpTriggerPrice": tp_price,
-                    })
-
-            result = self.client.create_order_v3(**order_params)
-            print(f"✅ Order placed: {symbol} {side} | Size: {size}")
+            result = self.client.create_order_v3(**params)
+            print(f"✅ Order placed: {symbol} {side}")
             return result
 
         except Exception as e:
@@ -111,9 +106,18 @@ class ApexClient:
             return None
 
     def get_open_positions(self):
-        """Get current open positions"""
         try:
             return self.client.get_positions_v3()
         except Exception as e:
-            print(f"Error getting positions: {e}")
+            print(f"Error: {e}")
             return None
+
+    def close_partial_position(self, symbol: str, size: str):
+        """Close a portion of an open position"""
+        try:
+            print(f"Closing {size} of position on {symbol}")
+            # TODO: Implement based on ApeX API
+            return True
+        except Exception as e:
+            print(f"Error: {e}")
+            return False

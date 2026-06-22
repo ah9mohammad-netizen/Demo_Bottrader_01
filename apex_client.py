@@ -1,6 +1,6 @@
 # apex_client.py
 """
-ApeX Omni Execution Layer
+ApeX Omni Client - Execution Layer
 """
 
 import os
@@ -48,24 +48,14 @@ class ApexClient:
             print(f"Error: {e}")
             return None
 
-    def get_contract_balance(self):
-        """Get available USDT balance in contract account"""
-        try:
-            account = self.client.get_account_v3()
-            # This structure may vary. Adjust based on actual response.
-            if "contractWallets" in account and account["contractWallets"]:
-                for wallet in account["contractWallets"]:
-                    if wallet.get("tokenId") == "141":  # USDT
-                        return float(wallet.get("balance", 0))
-            return 0.0
-        except Exception as e:
-            print(f"Error getting balance: {e}")
-            return 0.0
-
     def place_market_order_with_tp_sl(
         self, symbol: str, side: str, size: str, leverage: int = 7,
         tp_price: str = None, sl_price: str = None
     ):
+        """
+        Place market order with TP and SL.
+        Using the correct structure from the library.
+        """
         try:
             current_time = int(time.time())
 
@@ -97,7 +87,8 @@ class ApexClient:
                     "tpTriggerPrice": tp_price,
                 })
 
-            result = self.client.create_order_v3(**params)
+            # Using the sdk submodule (more reliable)
+            result = self.client.sdk.create_order_v3(**params)
             print(f"✅ Order placed: {symbol} {side}")
             return result
 
@@ -107,16 +98,15 @@ class ApexClient:
 
     def get_open_positions(self):
         try:
-            return self.client.get_positions_v3()
+            return self.client.sdk.get_positions_v3()
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error getting positions: {e}")
             return None
 
     def close_partial_position(self, symbol: str, size: str):
-        """Close a portion of an open position"""
         try:
             print(f"Closing {size} of position on {symbol}")
-            # TODO: Implement based on ApeX API
+            # TODO: Implement based on ApeX response
             return True
         except Exception as e:
             print(f"Error: {e}")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram Crypto Signal Trading Bot
-Full Strategy Implementation with Risk Management
+Main Brain - Full Strategy + Reverse Signal + Real Sizing
 """
 
 import asyncio
@@ -24,15 +24,14 @@ SIGNAL_GROUP_ID = -1002344170059
 
 SESSION_STRING = os.getenv("SESSION_STRING")
 
-# ==================== STRATEGY PARAMETERS ====================
+# ==================== STRATEGY ====================
 LEVERAGE = 7
-ALLOCATION_PERCENT = 0.05          # 5% of balance per trade
-TP1_PERCENT = 1.0                  # 1% price move
-TP2_PERCENT = 2.0                  # 2% price move
-SL_PERCENT = 2.5                   # 2.5% price move (Stop Loss)
+ALLOCATION_PERCENT = 0.05
+TP1_PERCENT = 1.0
+TP2_PERCENT = 2.0
+SL_PERCENT = 2.5
 
-# Risk Management
-MAX_DAILY_LOSS = 5.0               # 5% max daily loss
+MAX_DAILY_LOSS = 5.0
 MAX_CONSECUTIVE_LOSSES = 4
 COOLDOWN_HOURS = 48
 MAX_COOLDOWNS = 3
@@ -42,62 +41,70 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Crypto Trading Bot is running"
+    return "✅ Trading Bot Running"
 
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-# ==================== APEX CLIENT ====================
-apex_client = ApexClient()
+# ==================== CLIENT ====================
+apex = ApexClient()
 
-# ==================== RISK MANAGEMENT STATE ====================
+# ==================== RISK STATE ====================
 daily_loss = 0.0
 consecutive_losses = 0
 cooldown_until = None
 cooldown_count = 0
 last_trade_date = None
 
-# ==================== TELEGRAM BOT ====================
+# Track open trades for TP1 monitoring and reverse signal handling
+open_trades = {}   # symbol -> trade details
+
+# ==================== TELEGRAM ====================
 bot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== RISK MANAGEMENT ====================
 def is_in_cooldown():
     global cooldown_until
-    if cooldown_until and datetime.now() < cooldown_until:
-        return True
-    return False
+    return cooldown_until and datetime.now() < cooldown_until
 
 def check_risk_rules():
-    """Check if we can open a new position"""
     global consecutive_losses, cooldown_until, cooldown_count
 
     if cooldown_count >= MAX_COOLDOWNS:
-        return False, "Max cooldowns reached. Manual approval required."
+        return False, "Max cooldowns reached."
 
     if is_in_cooldown():
-        return False, "Currently in cooldown period."
+        return False, "Bot is in cooldown."
 
     if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
         cooldown_until = datetime.now() + timedelta(hours=COOLDOWN_HOURS)
         cooldown_count += 1
         consecutive_losses = 0
-        return False, f"4 consecutive losses reached. Cooldown started for {COOLDOWN_HOURS} hours."
+        return False, "Cooldown activated (48h)."
 
     return True, "OK"
 
-# ==================== SIGNAL PARSING ====================
+def calculate_position_size():
+    """Calculate 5% of available contract balance"""
+    try:
+        balance = apex.get_contract_balance()
+        available = balance * 0.9  # Keep 10% reserved
+        size = round(available * ALLOCATION_PERCENT, 2)
+        return str(max(size, 5))  # Minimum size safety
+    except:
+        return "10"
+
+# ==================== SIGNAL HANDLING ====================
 ENTRY_PATTERN = re.compile(
     r"(?:BINANCE|BITSTAMP):\s*(ENTER-)?(LONG|SHORT)[🟢🔴]*,?\s*([A-Z]+USDT)\s*,?\s*💲current price\s*=\s*([\d.]+)",
     re.IGNORECASE
 )
 
 @bot.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
-async def handle_signal(event):
-    global consecutive_losses, daily_loss, last_trade_date
+async def on_signal(event):
+    global consecutive_losses
 
-    text = event.raw_text
-    match = ENTRY_PATTERN.search(text)
-
+    match = ENTRY_PATTERN.search(event.raw_text)
     if not match:
         return
 
@@ -105,7 +112,6 @@ async def handle_signal(event):
     pair = match.group(3).upper()
     entry_price = float(match.group(4))
 
-    # Check risk rules
     can_trade, reason = check_risk_rules()
     if not can_trade:
         await bot.send_message(USER_CHAT_ID, f"⚠️ Trade blocked: {reason}")
@@ -114,7 +120,16 @@ async def handle_signal(event):
     side = "SELL" if direction == "SHORT" else "BUY"
     symbol = pair.replace("USDT", "-USDT")
 
-    # Calculate TP and SL prices
+    # === Reverse Signal Handling ===
+    if symbol in open_trades:
+        existing = open_trades[symbol]
+        if existing["side"] != side:
+            # Close existing position first
+            await bot.send_message(USER_CHAT_ID, f"🔄 Reverse signal detected on {symbol}. Closing existing position...")
+            apex.close_partial_position(symbol, existing["remaining_size"])
+            del open_trades[symbol]
+
+    # Calculate TP & SL
     if direction == "SHORT":
         tp1 = round(entry_price * (1 - TP1_PERCENT / 100), 6)
         tp2 = round(entry_price * (1 - TP2_PERCENT / 100), 6)
@@ -124,70 +139,68 @@ async def handle_signal(event):
         tp2 = round(entry_price * (1 + TP2_PERCENT / 100), 6)
         sl = round(entry_price * (1 - SL_PERCENT / 100), 6)
 
-    # Get account balance (simplified)
-    account = apex_client.get_account_info()
-    # For now, we use fixed size. Later we can calculate 5% of balance.
+    size = calculate_position_size()
 
-    size = "10"  # Temporary fixed size for testing
-
-    # Place order
-    result = apex_client.place_market_order_with_tp_sl(
+    result = apex.place_market_order_with_tp_sl(
         symbol=symbol,
         side=side,
         size=size,
         leverage=LEVERAGE,
-        tp_price=str(tp1),
+        tp_price=str(tp2),
         sl_price=str(sl)
     )
 
     if result:
-        await bot.send_message(
-            USER_CHAT_ID,
-            f"✅ New Position Opened\n"
-            f"{direction} {symbol} @ {entry_price}\n"
-            f"Leverage: {LEVERAGE}x\n"
-            f"TP1: {tp1} | TP2: {tp2}\n"
-            f"SL: {sl}"
-        )
+        open_trades[symbol] = {
+            "entry_price": entry_price,
+            "tp1": tp1,
+            "tp2": tp2,
+            "sl": sl,
+            "size": size,
+            "side": side,
+            "remaining_size": size
+        }
+        await bot.send_message(USER_CHAT_ID, f"✅ Opened {direction} {symbol}")
     else:
         await bot.send_message(USER_CHAT_ID, "❌ Failed to open position")
 
-# ==================== TELEGRAM COMMANDS ====================
-@bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/start'))
-async def cmd_start(event):
-    await event.reply("✅ Bot is active and listening to signals.")
+# ==================== COMMANDS ====================
+@bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/status'))
+async def status(event):
+    status = "🟢 Normal"
+    if is_in_cooldown():
+        status = "🟡 Cooldown"
+    elif cooldown_count >= MAX_COOLDOWNS:
+        status = "🔴 Paused"
+
+    await event.reply(
+        f"**Bot Status**\n"
+        f"Status: {status}\n"
+        f"Consecutive Losses: {consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}\n"
+        f"Cooldowns: {cooldown_count}/{MAX_COOLDOWNS}"
+    )
 
 @bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/positions'))
-async def cmd_positions(event):
-    positions = apex_client.get_open_positions()
-    if positions:
-        await event.reply(f"Open Positions:\n{positions}")
-    else:
-        await event.reply("No open positions.")
+async def positions(event):
+    pos = apex.get_open_positions()
+    await event.reply(f"Positions:\n{pos}" if pos else "No positions")
 
 @bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r'/help'))
-async def cmd_help(event):
-    await event.reply(
-        "Commands:\n"
-        "/positions - Show open positions\n"
-        "/help - This message"
-    )
+async def help_cmd(event):
+    await event.reply("/status, /positions, /help")
 
 # ==================== MAIN ====================
 async def main():
     print("🚀 Starting Trading Bot...")
 
     await bot.start()
-    print("✅ Telegram bot started")
+    print("✅ Telegram connected")
 
-    apex_client.test_connection()
+    apex.test_connection()
 
-    print("👂 Listening for signals and commands...")
+    print("👂 Listening for signals...")
     await bot.run_until_disconnected()
 
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
+    threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(main())

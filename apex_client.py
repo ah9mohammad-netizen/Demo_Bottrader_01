@@ -77,13 +77,15 @@ class ApexClient:
                 "APEX_API_PASSPHRASE, APEX_OMNI_KEY_SEED"
             )
 
-        # default_to_rwa=False  ->  trade on the PRIMARY perpetual account.
-        # (HttpPrivate_v3 defaults default_to_rwa=True, which would target the
-        #  RWA/stock sub-account and fail for normal perps.)
+        # NOTE: we intentionally do NOT pass default_to_rwa= here.
+        # That kwarg is version-dependent — on some apexomni builds
+        # HttpPrivateSign.__init__(*args, rwa_prefix=None, **kwargs) forwards it
+        # straight to HTTP.__init__, causing:
+        #   "HTTP.__init__() got an unexpected keyword argument 'default_to_rwa'"
+        # Instead we set the account type AFTER construction (see below).
         self.client = HttpPrivateSign(
             APEX_OMNI_HTTP_MAIN,
             network_id=NETWORKID_MAIN,
-            default_to_rwa=False,
             zk_seeds=self.seeds,
             zk_l2Key=self.l2_key or None,
             api_key_credentials={
@@ -92,6 +94,14 @@ class ApexClient:
                 "passphrase": self.passphrase,
             },
         )
+
+        # Force the PRIMARY perpetual account (NOT the RWA/stock sub-account).
+        # set_default_account_type is available on all versions and is the
+        # version-safe way to override the default, which some builds set to RWA.
+        try:
+            self.client.set_default_account_type("primary")
+        except Exception:
+            pass  # older builds without RWA support already default to primary
 
         # L2 public key is required for order signing.
         if not getattr(self.client, "zk_l2Key", None):

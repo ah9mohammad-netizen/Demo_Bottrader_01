@@ -640,12 +640,13 @@ class TradingBot:
     #  RUN
     # ================================================================== #
     async def run(self):
-        await self.initialize()
+        # Connect Telegram FIRST, so notify() works during the ApeX init loop.
         self.register_commands()
         self.register_signal_listener()
-
         await self.tg.start()
         print("[Brain] Telegram connected.")
+
+        await self.initialize()          # ApeX connect (with retry); notify() now works
 
         asyncio.create_task(self.monitor_loop())
         print("[Brain] 🎧 Listening for signals & monitoring positions...")

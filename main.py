@@ -56,7 +56,6 @@ cooldown_until = None
 cooldown_count = 0
 last_trade_date = None
 
-# Track open trades for TP1 monitoring
 open_trades = {}
 
 # ==================== TELEGRAM ====================
@@ -104,7 +103,7 @@ async def on_signal(event):
 
     text = event.raw_text
 
-    # === ENTRY SIGNAL ===
+    # Entry Signal
     match = ENTRY_PATTERN.search(text)
     if match:
         direction = match.group(2).upper()
@@ -119,7 +118,6 @@ async def on_signal(event):
         side = "SELL" if direction == "SHORT" else "BUY"
         symbol = pair.replace("USDT", "-USDT")
 
-        # Calculate TP2 and SL
         if direction == "SHORT":
             tp2 = round(entry_price * (1 - TP2_PERCENT / 100), 6)
             sl = round(entry_price * (1 + SL_PERCENT / 100), 6)
@@ -152,7 +150,7 @@ async def on_signal(event):
             await bot.send_message(USER_CHAT_ID, "❌ Failed to open position")
         return
 
-    # === TP SIGNAL HANDLING ===
+    # TP Signal Handling
     tp_match = TP_PATTERN.search(text)
     if tp_match:
         direction = tp_match.group(1).upper()
@@ -162,16 +160,12 @@ async def on_signal(event):
 
         if symbol in open_trades:
             trade = open_trades[symbol]
-
             if tp_level == 1:
-                # Close 50% at TP1
                 half_size = str(float(trade["size"]) * 0.5)
                 apex.close_partial_position(symbol, half_size)
                 trade["remaining_size"] = str(float(trade["size"]) * 0.5)
                 await bot.send_message(USER_CHAT_ID, f"💰 TP1 hit on {symbol} - 50% closed")
-
             elif tp_level == 2:
-                # Close remaining at TP2
                 apex.close_partial_position(symbol, trade["remaining_size"])
                 del open_trades[symbol]
                 await bot.send_message(USER_CHAT_ID, f"💰 TP2 hit on {symbol} - Position closed")

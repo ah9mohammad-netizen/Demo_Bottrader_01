@@ -413,11 +413,17 @@ class ApexClient:
             return self._result(False, error=str(e))
 
     def close_position(self, symbol, size=None):
-        """Fully close (or close `size` of) a position. size=None => close entire position."""
+        """Fully close (or close `size` of) a position. size=None => close entire position.
+
+        On a FULL close, attached TP/SL orders are cancelled first (they are
+        reduce-only and now pointless). On a partial close they are left intact.
+        """
         try:
             pos = self.get_position(symbol)
             if not pos:
                 return self._result(False, error=f"No open position on {symbol}")
+            if size is None:
+                self.cancel_all_orders(symbol)            # drop TP/SL legs
             pos_side = pos.get("side")
             close_side = "SELL" if str(pos_side).upper() in ("LONG", "BUY") else "BUY"
             close_size = size if size else str(abs(_to_float(pos.get("size"))))
@@ -486,7 +492,9 @@ class ApexClient:
             records.sort(key=lambda r: r.get("createdAt", 0), reverse=True)
             for rec in records:
                 if rec.get("type") in ("CLOSE_POSITION", "LIQUIDATE", None):
-                    return _to_float(rec.get("totalPnl"), default=None)
+                    # Return the FULL record so the Brain can classify the closure
+                    # (SL vs TP) using exitPrice / isLiquidate / totalPnl.
+                    return rec
             return None
         except Exception as e:
             print(f"[ApeX] get_realized_pnl warning: {e}")

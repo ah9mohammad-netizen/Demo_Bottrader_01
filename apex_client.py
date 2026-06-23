@@ -21,6 +21,13 @@ import importlib
 from apexomni.http_private_sign import HttpPrivateSign
 from apexomni.constants import APEX_OMNI_HTTP_MAIN, NETWORKID_MAIN
 
+# Raw REST endpoint paths (from the ApeX Omni API docs). Used as a fallback
+# when the SDK wrapper methods don't exist in the installed version.
+EP_ACCOUNT_BALANCE = "/api/v3/account-balance"
+EP_WORST_PRICE = "/api/v3/get-worst-price"
+EP_SET_MARGIN_RATE = "/api/v3/set-initial-margin-rate"
+EP_HISTORICAL_PNL = "/api/v3/historical-pnl"
+
 
 # --------------------------------------------------------------------------- #
 #  Helpers
@@ -109,8 +116,22 @@ class ApexClient:
 
         # create_order_v3() REQUIRES both config + account snapshot to be loaded,
         # otherwise it raises. Pre-load them once.
-        self.client.configs_v3()
-        self.client.get_account_v3()
+        # Version-proof: use whichever config/account method exists.
+        if hasattr(self.client, "configs_v3"):
+            self.client.configs_v3()
+        elif hasattr(self.client, "configs"):
+            self.client.configs()
+        else:
+            raw = self.client._get("/api/v3/symbols", {})
+            self.client.configV3 = self._unwrap(raw)
+
+        if hasattr(self.client, "get_account_v3"):
+            self.client.get_account_v3()
+        elif hasattr(self.client, "get_account"):
+            self.client.get_account()
+        else:
+            raw = self.client._get("/api/v3/account", {})
+            self._unwrap(raw)  # caches via the unwrap path
 
     # ---- internal response helper ---------------------------------------- #
     @staticmethod
@@ -144,9 +165,18 @@ class ApexClient:
     #  ACCOUNT & BALANCE
     # ===================================================================== #
     def get_account_info(self):
-        """Raw account data (positions, equity, etc.)."""
+        """Raw account data (positions, equity, etc.).
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _get.
+        """
         try:
-            return self.client.get_account_v3()
+            if hasattr(self.client, "get_account_v3"):
+                return self.client.get_account_v3()
+            elif hasattr(self.client, "get_account"):
+                return self.client.get_account()
+            else:
+                raw = self.client._get("/api/v3/account", {})
+                return self._unwrap(raw)
         except Exception as e:
             print(f"[ApeX] get_account_info error: {e}")
             return None
@@ -156,9 +186,16 @@ class ApexClient:
 
         Confirmed fields: totalEquityValue, availableBalance, initialMargin,
         maintenanceMargin, symbolToOraclePrice.
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _get.
         """
         try:
-            raw = self.client.get_account_balance_v3()
+            if hasattr(self.client, "get_account_balance_v3"):
+                raw = self.client.get_account_balance_v3()
+            elif hasattr(self.client, "get_account_balance"):
+                raw = self.client.get_account_balance()
+            else:
+                raw = self.client._get(EP_ACCOUNT_BALANCE, {})
             return self._unwrap(raw)
         except Exception as e:
             print(f"[ApeX] get_account_balance error: {e}")
@@ -197,6 +234,8 @@ class ApexClient:
 
         Positions live under get_account_v3()['positions'] (Omni) — handled
         defensively in case the key differs ('positionInfo').
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _get.
         """
         account = self.get_account_info()
         if not account:
@@ -276,23 +315,36 @@ class ApexClient:
 
         Docs: initialMarginRate = "the reciprocal of the opening leverage".
         So 7x -> initialMarginRate = 1/7 = 0.142857.
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _post.
         """
         try:
             imr = round(1.0 / float(leverage), 6)
-            self.client.set_initial_margin_rate_v3(
-                symbol=symbol, initialMarginRate=str(imr)
-            )
+            data = {"symbol": symbol, "initialMarginRate": str(imr)}
+            if hasattr(self.client, "set_initial_margin_rate_v3"):
+                self.client.set_initial_margin_rate_v3(**data)
+            elif hasattr(self.client, "set_initial_margin_rate"):
+                self.client.set_initial_margin_rate(**data)
+            else:
+                self.client._post(EP_SET_MARGIN_RATE, data)
             return True
         except Exception as e:
             print(f"[ApeX] set_leverage({symbol}, {leverage}) warning: {e}")
             return False
 
     def get_worst_price(self, symbol, side, size):
-        """Worst acceptable fill price for a market order (slippage cap)."""
+        """Worst acceptable fill price for a market order (slippage cap).
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _get.
+        """
         try:
-            raw = self.client.get_worst_price_v3(
-                symbol=symbol, side=side, size=str(size)
-            )
+            params = {"symbol": symbol, "side": side, "size": str(size)}
+            if hasattr(self.client, "get_worst_price_v3"):
+                raw = self.client.get_worst_price_v3(**params)
+            elif hasattr(self.client, "get_worst_price"):
+                raw = self.client.get_worst_price(**params)
+            else:
+                raw = self.client._get(EP_WORST_PRICE, params)
             data = self._unwrap(raw)
             wp = _to_float(data.get("worstPrice")) if isinstance(data, dict) else 0.0
             if wp > 0:
@@ -443,12 +495,20 @@ class ApexClient:
             return self._result(False, error=str(e))
 
     def cancel_all_orders(self, symbol=None):
-        """Cancel all open + conditional orders (removes attached TP/SL legs)."""
+        """Cancel all open + conditional orders (removes attached TP/SL legs).
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _post.
+        """
         try:
-            kwargs = {}
+            data = {}
             if symbol:
-                kwargs["symbol"] = symbol
-            self.client.delete_open_orders_v3(**kwargs)
+                data["symbol"] = symbol
+            if hasattr(self.client, "delete_open_orders_v3"):
+                self.client.delete_open_orders_v3(**data)
+            elif hasattr(self.client, "delete_open_orders"):
+                self.client.delete_open_orders(**data)
+            else:
+                self.client._post("/api/v3/delete-open-orders", data)
             return True
         except Exception as e:
             print(f"[ApeX] cancel_all_orders warning: {e}")
@@ -486,16 +546,23 @@ class ApexClient:
     #  PnL / WIN-LOSS DETECTION
     # ===================================================================== #
     def get_realized_pnl(self, symbol, since_ms=None):
-        """Most recent realized PnL (totalPnl) for a symbol from historical-pnl.
+        """Most recent realized PnL record for a symbol from historical-pnl.
 
         Used by the Brain to classify a closed trade as a WIN or LOSS.
-        Returns the totalPnl float, or None if nothing found.
+        Returns the FULL record dict, or None if nothing found.
+
+        Version-proof: tries _v3 wrapper, then non-_v3 wrapper, then raw _get.
         """
         try:
-            kwargs = dict(symbol=symbol, limit=5, page=0)
+            params = {"symbol": symbol, "limit": 5, "page": 0}
             if since_ms:
-                kwargs["beginTimeInclusive"] = str(int(since_ms))
-            raw = self.client.historical_pnl_v3(**kwargs)
+                params["beginTimeInclusive"] = str(int(since_ms))
+            if hasattr(self.client, "historical_pnl_v3"):
+                raw = self.client.historical_pnl_v3(**params)
+            elif hasattr(self.client, "historical_pnl"):
+                raw = self.client.historical_pnl(**params)
+            else:
+                raw = self.client._get(EP_HISTORICAL_PNL, params)
             data = self._unwrap(raw)
             records = (data or {}).get("historicalPnl") or []
             # most recent first (largest createdAt)

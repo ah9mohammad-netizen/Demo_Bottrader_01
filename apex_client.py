@@ -1,11 +1,12 @@
 # apex_client.py
 """
-ApeX Omni Client - Execution Layer
+ApeX Omni Execution Layer
+Based on official apexpro-openapi examples
 """
 
 import os
 import time
-from apexomni.http_private_v3 import HttpPrivate_v3
+from apexomni.http_private_v3 import HttpPrivateSign
 from apexomni.constants import APEX_OMNI_HTTP_MAIN, NETWORKID_MAIN
 
 
@@ -15,12 +16,12 @@ class ApexClient:
         self.secret = os.getenv("APEX_API_SECRET")
         self.passphrase = os.getenv("APEX_API_PASSPHRASE")
         self.seeds = os.getenv("APEX_OMNI_KEY_SEED")
-        self.l2_key = os.getenv("APEX_L2_KEY", "")
+        self.l2_key = os.getenv("APEX_L2_KEY", "")   # Optional
 
         if not all([self.key, self.secret, self.passphrase, self.seeds]):
             raise ValueError("Missing ApeX API credentials")
 
-        self.client = HttpPrivate_v3(
+        self.client = HttpPrivateSign(
             APEX_OMNI_HTTP_MAIN,
             network_id=NETWORKID_MAIN,
             zk_seeds=self.seeds,
@@ -53,8 +54,8 @@ class ApexClient:
         tp_price: str = None, sl_price: str = None
     ):
         """
-        Place market order with TP and SL.
-        Using the correct structure from the library.
+        Place market order with Stop Loss and Take Profit.
+        Uses the correct method from the official examples.
         """
         try:
             current_time = int(time.time())
@@ -87,8 +88,7 @@ class ApexClient:
                     "tpTriggerPrice": tp_price,
                 })
 
-            # Using the sdk submodule (more reliable)
-            result = self.client.sdk.create_order_v3(**params)
+            result = self.client.create_order_v3(**params)
             print(f"✅ Order placed: {symbol} {side}")
             return result
 
@@ -98,7 +98,7 @@ class ApexClient:
 
     def get_open_positions(self):
         try:
-            return self.client.sdk.get_positions_v3()
+            return self.client.get_positions_v3()
         except Exception as e:
             print(f"Error getting positions: {e}")
             return None
@@ -106,7 +106,7 @@ class ApexClient:
     def close_partial_position(self, symbol: str, size: str):
         try:
             print(f"Closing {size} of position on {symbol}")
-            # TODO: Implement based on ApeX response
+            # TODO: Implement based on ApeX API
             return True
         except Exception as e:
             print(f"Error: {e}")

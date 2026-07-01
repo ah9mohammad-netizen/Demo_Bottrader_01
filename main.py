@@ -45,6 +45,7 @@ API_HASH = "323309715087bdf4e2e132c33b3ee242"
 USER_CHAT_ID = 7600450275
 SIGNAL_GROUP_ID = -1002344170059
 SESSION_STRING = os.getenv("SESSION_STRING")
+TRADER_BOT_TOKEN = os.getenv("TRADER_BOT_TOKEN")  # @Traderahmbot token (commands)
 
 # ---- strategy ----
 LEVERAGE = 7
@@ -120,7 +121,13 @@ TP_PATTERN = re.compile(
 class TradingBot:
     def __init__(self):
         self.apex = None                       # ApexClient (lazy-init)
-        self.tg = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+        # User client: reads the signal channel (needs user-account access).
+        # A Bot API bot cannot read arbitrary channels/groups it isn't a member of.
+        self.tg_user = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+        # Bot client: handles commands + sends notifications.
+        # Uses the @Traderahmbot token so it's ISOLATED from your other bots —
+        # each Bot API bot only receives messages sent directly to it.
+        self.tg_bot = TelegramClient(StringSession(), API_ID, API_HASH)
 
         # ---- risk state ----
         self.daily_loss_amount = 0.0           # gross SL-losses today (USD)
@@ -187,7 +194,7 @@ class TradingBot:
 
     async def notify(self, msg):
         try:
-            await self.tg.send_message(USER_CHAT_ID, msg)
+            await self.tg_bot.send_message(USER_CHAT_ID, msg)
         except Exception as e:
             print(f"[Brain] notify failed: {e}")
 
@@ -500,7 +507,7 @@ class TradingBot:
     # ================================================================== #
     def register_commands(self):
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/start"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/start"))
         async def _start(event):
             if self.manual_approval_required:
                 self.manual_approval_required = False
@@ -513,7 +520,7 @@ class TradingBot:
                 await event.reply("🟢 Bot running. Commands: /status /positions "
                                   "/balance /test_order /closeall /help")
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/status"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/status"))
         async def _status(event):
             self.reset_daily_if_needed()
             if self.manual_approval_required:
@@ -533,7 +540,7 @@ class TradingBot:
                 f"Cooldowns: {self.cooldown_count}/{MAX_COOLDOWNS}\n"
                 f"Open trades: {len(self.open_trades)}")
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/positions"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/positions"))
         async def _positions(event):
             if not self.apex:
                 await event.reply("ApeX not connected.")
@@ -549,7 +556,7 @@ class TradingBot:
                     f"entry={p.get('entryPrice')}")
             await event.reply("\n".join(lines))
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/balance"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/balance"))
         async def _balance(event):
             if not self.apex:
                 await event.reply("ApeX not connected.")
@@ -562,7 +569,7 @@ class TradingBot:
                 f"Available: {self.apex.get_available_balance():.2f}\n"
                 f"Reserved (never traded): {reserve:.2f}")
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/test_order"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/test_order"))
         async def _test_order(event):
             """Open + immediately close a min-size order to verify the pipeline.
             NOTE: this is a REAL trade (tiny size, incurs fees)."""
@@ -584,7 +591,7 @@ class TradingBot:
             else:
                 await event.reply(f"⚠️ Test close failed: {cr['error']} (position is open)")
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/closeall"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/closeall"))
         async def _closeall(event):
             if not self.apex:
                 await event.reply("ApeX not connected.")
@@ -597,7 +604,7 @@ class TradingBot:
             self.save_state()
             await event.reply(f"✅ Close-all done: {data.get('closed', 0)} position(s).")
 
-        @self.tg.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/help"))
+        @self.tg_bot.on(events.NewMessage(from_users=USER_CHAT_ID, pattern=r"/help"))
         async def _help(event):
             await event.reply(
                 "**Commands**\n"
@@ -614,7 +621,7 @@ class TradingBot:
     # ================================================================== #
     def register_signal_listener(self):
 
-        @self.tg.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
+        @self.tg_user.on(events.NewMessage(chats=SIGNAL_GROUP_ID))
         async def _on_signal(event):
             if not self.apex:
                 return
@@ -640,17 +647,33 @@ class TradingBot:
     #  RUN
     # ================================================================== #
     async def run(self):
-        # Connect Telegram FIRST, so notify() works during the ApeX init loop.
+        # ---- Start the USER client (signal reader) ----
+        await self.tg_user.start()
+        print("[Brain] Telegram user session connected (signal reader).")
+
+        # ---- Start the BOT client (commands + notifications) ----
+        if TRADER_BOT_TOKEN:
+            await self.tg_bot.start(bot_token=TRADER_BOT_TOKEN)
+            print("[Brain] Telegram bot connected (@Traderahmbot).")
+        else:
+            print("[Brain] ⚠️ TRADER_BOT_TOKEN not set — commands disabled, "
+                  "signals + notifications still work via user session.")
+
+        # Register handlers (commands on bot, signals on user)
         self.register_commands()
         self.register_signal_listener()
-        await self.tg.start()
-        print("[Brain] Telegram connected.")
 
-        await self.initialize()          # ApeX connect (with retry); notify() now works
+        # Initialize ApeX (after Telegram so notifications work)
+        await self.initialize()
 
         asyncio.create_task(self.monitor_loop())
         print("[Brain] 🎧 Listening for signals & monitoring positions...")
-        await self.tg.run_until_disconnected()
+
+        # Run both clients concurrently until disconnected
+        tasks = [self.tg_user.run_until_disconnected()]
+        if TRADER_BOT_TOKEN:
+            tasks.append(self.tg_bot.run_until_disconnected())
+        await asyncio.gather(*tasks)
 
 
 # =========================================================================== #
